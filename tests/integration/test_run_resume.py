@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -153,3 +153,52 @@ def test_create_does_not_accept_an_arbitrary_status_or_stage(
             status=RunStatus.RESUMABLE,
             current_stage=RunStage.FILTER_COMPLETE,
         )
+
+
+def test_legacy_single_checkpoint_is_read_resumed_and_preserved_on_advance(
+    database, approved_request: SearchRequest
+) -> None:  # type: ignore[no-untyped-def]
+    request_repository = RequestRepository(database)
+    request_repository.save_version(approved_request)
+    completed_at = datetime.now(UTC)
+    legacy_checkpoint = {"discovered_listing_ids": ["legacy-listing-1"]}
+    with database.session() as session:
+        session.add(
+            ResearchRunModel(
+                run_id="run-legacy",
+                request_id=approved_request.request_id,
+                request_version=approved_request.version,
+                status=RunStatus.RESUMABLE.value,
+                current_stage=RunStage.DISCOVERY_COMPLETE.value,
+                checkpoint_payload={
+                    "checkpoint": legacy_checkpoint,
+                    "idempotency_key": "run-legacy:discovery_complete",
+                },
+                started_at=completed_at,
+                completed_at=completed_at,
+            )
+        )
+
+    repository = RunRepository(database)
+    service = ResearchRunService(request_repository, repository)
+    loaded = repository.get("run-legacy")
+    assert loaded.checkpoint == legacy_checkpoint
+    assert loaded.checkpoints[RunStage.DISCOVERY_COMPLETE].checkpoint == legacy_checkpoint
+    assert (
+        loaded.checkpoints[RunStage.DISCOVERY_COMPLETE].idempotency_key
+        == "run-legacy:discovery_complete"
+    )
+
+    resume_point = service.resume("run-legacy")
+    assert resume_point.next_stage is RunStage.FILTER_COMPLETE
+    assert resume_point.checkpoint == legacy_checkpoint
+
+    service.advance("run-legacy", RunStage.FILTER_COMPLETE, {"candidate_count": 1})
+    advanced = repository.get("run-legacy")
+    assert advanced.current_stage is RunStage.FILTER_COMPLETE
+    assert advanced.checkpoint == {"candidate_count": 1}
+    assert advanced.checkpoints[RunStage.DISCOVERY_COMPLETE].checkpoint == legacy_checkpoint
+    assert set(advanced.checkpoints) == {
+        RunStage.DISCOVERY_COMPLETE,
+        RunStage.FILTER_COMPLETE,
+    }
