@@ -74,3 +74,49 @@ def test_approved_search_request_rejects_direct_version_mutation() -> None:
 
     with pytest.raises(ValidationError):
         request.version = 2
+
+
+def test_approved_search_request_rejects_collection_mutation() -> None:
+    request = SearchRequest(
+        request_id="req-approved-collections",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(
+            minimum=Decimal("600000000"),  # noqa: FURB157
+            maximum=Decimal("900000000"),  # noqa: FURB157
+        ),
+        required=["아파트"],
+        preferred=["역세권"],
+        excluded=["반지하"],
+        special_questions=["재건축 여부"],
+        status=RequestStatus.APPROVED,
+    )
+
+    with pytest.raises(AttributeError):
+        request.required.append("신축")
+    with pytest.raises(AttributeError):
+        request.preferred.append("남향")
+    with pytest.raises(AttributeError):
+        request.excluded.append("고층")
+    with pytest.raises(AttributeError):
+        request.special_questions.append("학군")
+    with pytest.raises(AttributeError):
+        request.regions.append(RegionCriterion(name="서울 양천구"))
+
+
+def test_approved_search_request_rejects_nested_mutation() -> None:
+    request = SearchRequest(
+        request_id="req-approved-nested",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(
+            minimum=Decimal("600000000"),  # noqa: FURB157
+            maximum=Decimal("900000000"),  # noqa: FURB157
+        ),
+        status=RequestStatus.APPROVED,
+    )
+
+    with pytest.raises(ValidationError):
+        request.regions[0].name = "서울 양천구"
+    with pytest.raises(ValidationError):
+        request.budget.maximum = Decimal("1000000000")  # noqa: FURB157

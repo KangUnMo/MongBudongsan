@@ -18,6 +18,8 @@ class RequestStatus(StrEnum):
 
 
 class MoneyRange(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     minimum: Decimal = Field(ge=0)
     maximum: Decimal = Field(gt=0)
 
@@ -29,6 +31,8 @@ class MoneyRange(BaseModel):
 
 
 class RegionCriterion(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str = Field(min_length=1)
     allow_expansion: bool = False
 
@@ -58,10 +62,10 @@ class SearchRequest(BaseModel):
 
     request_id: str = Field(min_length=1)
     version: int = Field(ge=1)
-    regions: Annotated[list[RegionCriterion], Field(min_length=1, max_length=5)]
+    regions: Annotated[tuple[RegionCriterion, ...], Field(min_length=1, max_length=5)]
     budget: MoneyRange
-    required: list[str] = Field(default_factory=list)
-    preferred: list[str] = Field(default_factory=list)
-    excluded: list[str] = Field(default_factory=list)
-    special_questions: list[str] = Field(default_factory=list)
+    required: tuple[str, ...] = Field(default_factory=tuple)
+    preferred: tuple[str, ...] = Field(default_factory=tuple)
+    excluded: tuple[str, ...] = Field(default_factory=tuple)
+    special_questions: tuple[str, ...] = Field(default_factory=tuple)
     status: RequestStatus = RequestStatus.DRAFT
