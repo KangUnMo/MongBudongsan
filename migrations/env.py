@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from logging.config import fileConfig
+from typing import cast
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -13,7 +14,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.environ.get("MYBUDONGSAN_DB_URL", config.get_main_option("sqlalchemy.url"))
+database_url = cast(
+    str,
+    config.attributes.get("mybudongsan_db_url")
+    or os.environ.get("MYBUDONGSAN_DB_URL")
+    or config.get_main_option("sqlalchemy.url"),
+)
 target_metadata = Base.metadata
 
 

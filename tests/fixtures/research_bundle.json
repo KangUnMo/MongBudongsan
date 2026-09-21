@@ -1,0 +1,33 @@
+{
+  "discovered": [
+    {"source": "fixture", "source_listing_id": "discovered-01", "complex_name": "발견 단지 01", "address": "서울 테스트구 1", "asking_price": 700000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-02", "complex_name": "발견 단지 02", "address": "서울 테스트구 2", "asking_price": 701000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-03", "complex_name": "발견 단지 03", "address": "서울 테스트구 3", "asking_price": 702000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-04", "complex_name": "발견 단지 04", "address": "서울 테스트구 4", "asking_price": 703000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-05", "complex_name": "발견 단지 05", "address": "서울 테스트구 5", "asking_price": 704000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-06", "complex_name": "발견 단지 06", "address": "서울 테스트구 6", "asking_price": 705000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-07", "complex_name": "발견 단지 07", "address": "서울 테스트구 7", "asking_price": 706000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-08", "complex_name": "발견 단지 08", "address": "서울 테스트구 8", "asking_price": 707000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-09", "complex_name": "발견 단지 09", "address": "서울 테스트구 9", "asking_price": 708000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-10", "complex_name": "발견 단지 10", "address": "서울 테스트구 10", "asking_price": 709000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-11", "complex_name": "발견 단지 11", "address": "서울 테스트구 11", "asking_price": 710000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-12", "complex_name": "발견 단지 12", "address": "서울 테스트구 12", "asking_price": 711000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-13", "complex_name": "발견 단지 13", "address": "서울 테스트구 13", "asking_price": 712000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-14", "complex_name": "발견 단지 14", "address": "서울 테스트구 14", "asking_price": 713000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"},
+    {"source": "fixture", "source_listing_id": "discovered-15", "complex_name": "발견 단지 15", "address": "서울 테스트구 15", "asking_price": 714000000, "status": "active", "observed_at": "2026-09-21T09:00:00Z"}
+  ],
+  "verified": [
+    {"source": "fixture", "source_listing_id": "verified-01", "complex_name": "검증 단지 01", "address": "서울 테스트구 21", "asking_price": 800000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-02", "complex_name": "검증 단지 02", "address": "서울 테스트구 22", "asking_price": 801000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-03", "complex_name": "검증 단지 03", "address": "서울 테스트구 23", "asking_price": 802000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-04", "complex_name": "검증 단지 04", "address": "서울 테스트구 24", "asking_price": 803000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-05", "complex_name": "검증 단지 05", "address": "서울 테스트구 25", "asking_price": 804000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-06", "complex_name": "검증 단지 06", "address": "서울 테스트구 26", "asking_price": 805000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"},
+    {"source": "fixture", "source_listing_id": "verified-07", "complex_name": "검증 단지 07", "address": "서울 테스트구 27", "asking_price": 806000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"}
+  ],
+  "deep_assessments": [
+    {"source": "fixture", "source_listing_id": "deep-01", "complex_name": "심층 단지 01", "address": "서울 테스트구 31", "asking_price": 900000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"},
+    {"source": "fixture", "source_listing_id": "deep-02", "complex_name": "심층 단지 02", "address": "서울 테스트구 32", "asking_price": 901000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"},
+    {"source": "fixture", "source_listing_id": "deep-03", "complex_name": "심층 단지 03", "address": "서울 테스트구 33", "asking_price": 902000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"}
+  ]
+}
