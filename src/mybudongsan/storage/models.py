@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -76,7 +77,7 @@ class ListingSnapshotModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"))
-    asking_price: Mapped[float | None] = mapped_column(Numeric)
+    asking_price: Mapped[Decimal | None] = mapped_column(Numeric)
     status: Mapped[str | None] = mapped_column(String(64))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -103,7 +104,7 @@ class AssessmentModel(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("research_runs.run_id"))
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"))
     passed_gates: Mapped[bool]
-    score: Mapped[float | None] = mapped_column(Numeric)
+    score: Mapped[Decimal | None] = mapped_column(Numeric)
     risks: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     rationale: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
