@@ -58,3 +58,19 @@ def test_profile_weights_must_total_one_hundred() -> None:
             price_weight=25,
             residential_weight=9,
         )
+
+
+def test_approved_search_request_rejects_direct_version_mutation() -> None:
+    request = SearchRequest(
+        request_id="req-approved",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(
+            minimum=Decimal("600000000"),  # noqa: FURB157
+            maximum=Decimal("900000000"),  # noqa: FURB157
+        ),
+        status=RequestStatus.APPROVED,
+    )
+
+    with pytest.raises(ValidationError):
+        request.version = 2

@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RequestStatus(StrEnum):
@@ -54,6 +54,8 @@ class BuyerProfile(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     request_id: str = Field(min_length=1)
     version: int = Field(ge=1)
     regions: Annotated[list[RegionCriterion], Field(min_length=1, max_length=5)]
