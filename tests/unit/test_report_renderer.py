@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -249,6 +250,7 @@ def test_renderer_leaves_no_partial_final_directory_when_writing_fails(
         renderer.render(_bundle(), tmp_path)
 
     _assert_no_published_or_temporary_artifacts(tmp_path)
+    assert not _artifact_lock_path(tmp_path).exists()
 
 
 def test_renderer_leaves_no_partial_final_directory_when_publish_fails(
@@ -265,6 +267,7 @@ def test_renderer_leaves_no_partial_final_directory_when_publish_fails(
         renderer.render(_bundle(), tmp_path)
 
     _assert_no_published_or_temporary_artifacts(tmp_path)
+    assert not _artifact_lock_path(tmp_path).exists()
 
 
 def test_renderer_does_not_overwrite_an_existing_complete_artifact_directory(tmp_path: Path) -> None:
@@ -278,6 +281,30 @@ def test_renderer_does_not_overwrite_an_existing_complete_artifact_directory(tmp
     assert artifacts.report_path.read_text(encoding="utf-8") == original_report
 
 
+def test_renderer_releases_artifact_lock_after_success(tmp_path: Path) -> None:
+    ReportRenderer().render(_bundle(), tmp_path)
+
+    assert not _artifact_lock_path(tmp_path).exists()
+
+
+def test_renderer_fails_without_mutating_artifacts_when_another_renderer_holds_lock(
+    tmp_path: Path,
+) -> None:
+    lock_path = _artifact_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        with pytest.raises(FileExistsError, match="artifact lock"):
+            ReportRenderer().render(_bundle(), tmp_path)
+
+        final_directory = lock_path.parent / "req-gangseo_gangseo-family"
+        assert not final_directory.exists()
+        assert list(lock_path.parent.iterdir()) == [lock_path]
+    finally:
+        os.close(descriptor)
+        lock_path.unlink()
+
+
 @pytest.mark.parametrize("request_id", (".", "..", "../escape", "safe/name", r"safe\\name", "\x00"))
 def test_renderer_rejects_unsafe_request_id_before_creating_artifacts(
     tmp_path: Path, request_id: str
@@ -286,6 +313,17 @@ def test_renderer_rejects_unsafe_request_id_before_creating_artifacts(
     bundle = _bundle().model_copy(update={"request": request})
 
     with pytest.raises(ValueError, match="request_id"):
+        ReportRenderer().render(bundle, tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("slug", (".", "..", "../escape", "safe/name", r"safe\\name", "\x00"))
+def test_renderer_rejects_unsafe_slug_before_creating_artifacts(tmp_path: Path, slug: str) -> None:
+    run = _bundle().run.model_copy(update={"slug": slug})
+    bundle = _bundle().model_copy(update={"run": run})
+
+    with pytest.raises(ValueError, match="slug"):
         ReportRenderer().render(bundle, tmp_path)
 
     assert list(tmp_path.iterdir()) == []
@@ -452,3 +490,7 @@ def _assert_no_published_or_temporary_artifacts(output_root: Path) -> None:
     parent = output_root / "2026" / "09"
     assert not (parent / "req-gangseo_gangseo-family").exists()
     assert not parent.exists() or list(parent.iterdir()) == []
+
+
+def _artifact_lock_path(output_root: Path) -> Path:
+    return output_root / "2026" / "09" / ".req-gangseo_gangseo-family.lock"

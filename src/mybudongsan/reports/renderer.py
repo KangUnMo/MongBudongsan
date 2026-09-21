@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import tempfile
 from datetime import datetime
@@ -152,23 +153,26 @@ class ReportRenderer:
 
     def render(self, bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
         artifacts = self._final_artifacts(bundle, output_root)
-        self._ensure_artifacts_are_new(artifacts)
         artifacts.directory.parent.mkdir(parents=True, exist_ok=True)
-        temporary_directory = Path(
-            tempfile.mkdtemp(
-                prefix=f".{artifacts.directory.name}.",
-                suffix=".tmp",
-                dir=artifacts.directory.parent,
-            )
-        )
-        temporary_artifacts = RenderedArtifacts(
-            directory=temporary_directory,
-            report_path=temporary_directory / "report.md",
-            candidates_path=temporary_directory / "candidates.csv",
-            run_data_path=temporary_directory / "run-data.json",
-        )
+        lock_path = self._artifact_lock_path(artifacts.directory)
+        lock_descriptor = self._acquire_artifact_lock(lock_path)
+        temporary_directory: Path | None = None
 
         try:
+            self._ensure_artifacts_are_new(artifacts)
+            temporary_directory = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{artifacts.directory.name}.",
+                    suffix=".tmp",
+                    dir=artifacts.directory.parent,
+                )
+            )
+            temporary_artifacts = RenderedArtifacts(
+                directory=temporary_directory,
+                report_path=temporary_directory / "report.md",
+                candidates_path=temporary_directory / "candidates.csv",
+                run_data_path=temporary_directory / "run-data.json",
+            )
             context = self._template_context(bundle)
             temporary_artifacts.report_path.write_text(
                 self._environment.get_template("report.md.j2").render(**context),
@@ -186,9 +190,11 @@ class ReportRenderer:
                 encoding="utf-8",
             )
             self._publish(temporary_directory, artifacts.directory)
-        except BaseException:
-            shutil.rmtree(temporary_directory, ignore_errors=True)
-            raise
+        finally:
+            if temporary_directory is not None:
+                shutil.rmtree(temporary_directory, ignore_errors=True)
+            os.close(lock_descriptor)
+            lock_path.unlink(missing_ok=True)
         return artifacts
 
     @staticmethod
@@ -201,6 +207,17 @@ class ReportRenderer:
         if final_directory.exists():
             raise FileExistsError(f"immutable artifact directory already exists: {final_directory}")
         temporary_directory.rename(final_directory)
+
+    @staticmethod
+    def _artifact_lock_path(final_directory: Path) -> Path:
+        return final_directory.parent / f".{final_directory.name}.lock"
+
+    @staticmethod
+    def _acquire_artifact_lock(lock_path: Path) -> int:
+        try:
+            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as error:
+            raise FileExistsError(f"artifact lock already exists: {lock_path}") from error
 
     @staticmethod
     def _final_artifacts(bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
