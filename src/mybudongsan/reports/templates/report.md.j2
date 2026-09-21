@@ -1,0 +1,50 @@
+# MyBudongsan 조사 보고서
+
+## 요청 조건 요약
+
+- 요청 ID: {{ bundle.request.request_id }} (v{{ bundle.request.version }})
+- 지역: {{ bundle.request.regions | map(attribute="name") | join(", ") }}
+- 예산: {{ format_money(bundle.request.budget.minimum) }} ~ {{ format_money(bundle.request.budget.maximum) }}
+- 필수: {{ bundle.request.required | join(", ") or "없음" }}
+- 선호: {{ bundle.request.preferred | join(", ") or "없음" }}
+- 제외: {{ bundle.request.excluded | join(", ") or "없음" }}
+- 특별 확인: {{ bundle.request.special_questions | join(", ") or "없음" }}
+
+## PM 결론
+
+{% if scenario_candidates %}{% for candidate in scenario_candidates %}- {{ candidate.scenario.value }}: {{ candidate.listing.complex_name or candidate.candidate_id }}
+{% endfor %}{% elif unassigned_qualified_candidates %}- 추천 시나리오 미지정
+{% else %}- 추천 없음
+{% endif %}
+## 최종 후보 비교
+
+| 시나리오 | 후보 | 호가 | 점수 | 조사 신뢰도 | 활성 상태 | 근거 |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+{% for candidate in bundle.candidates %}| {{ candidate.scenario.value if candidate.scenario else "" }} | {{ candidate.listing.complex_name or candidate.candidate_id }} | {{ format_money(candidate.listing.asking_price) }} | {{ candidate.assessment.total_score if candidate.assessment.total_score is not none else "" }} | {{ candidate.assessment.confidence }} | {{ candidate.listing.status or "" }} | {{ candidate.evidence_ids | join(", ") }} |
+{% endfor %}
+## 가격과 실거래
+
+{% for candidate, finding in findings_by_section["가격과 실거래"] %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ finding.text }} (근거: {{ finding.evidence_ids | join(", ") }})
+{% endfor %}
+## 교통 및 생활권
+
+{% for candidate, finding in findings_by_section["교통 및 생활권"] %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ finding.text }} (근거: {{ finding.evidence_ids | join(", ") }})
+{% endfor %}
+## 도시계획 및 정책
+
+{% for candidate, finding in findings_by_section["도시계획 및 정책"] %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ finding.text }} (근거: {{ finding.evidence_ids | join(", ") }})
+{% endfor %}
+## 위험과 미확인 사항
+
+{% for candidate in bundle.candidates %}{% for finding in candidate.findings if finding.section == "위험과 미확인 사항" %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ finding.text }} (근거: {{ finding.evidence_ids | join(", ") }})
+{% endfor %}{% for risk in candidate.risks %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ risk }}
+{% endfor %}{% endfor %}
+## 현장 방문 및 중개사 문의
+
+{% for candidate in bundle.candidates %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: 활성 매물 여부, 호가 변동, 관리 상태를 현장과 중개사에게 확인
+{% endfor %}
+## 출처 및 조사 기준시각
+
+- 조사 기준시각: {{ format_datetime(bundle.run.completed_at) }}
+{% for item in bundle.evidence %}- [{{ item.evidence_id }}] {{ item.source_type }} | {{ format_datetime(item.accessed_at) }} | {{ item.claim }} | {{ item.source_url }}{% if item.excerpt %} | {{ item.excerpt }}{% endif %}
+{% endfor %}
