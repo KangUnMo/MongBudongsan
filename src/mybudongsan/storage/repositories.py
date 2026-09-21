@@ -245,8 +245,9 @@ class AssessmentRepository:
         with self._database.session() as session:
             ListingRepository._require_run(session, run_id)
             self._require_listing(session, listing_id)
-            self._validate_evidence_ownership(session, run_id, listing_id, evaluation_input)
-            result = evaluate_listing(evaluation_input)
+            canonical_input = EvaluationInput.model_validate(evaluation_input.model_dump(mode="json"))
+            self._validate_evidence_ownership(session, run_id, listing_id, canonical_input)
+            result = evaluate_listing(canonical_input)
             assessment = AssessmentModel(
                 run_id=run_id,
                 listing_id=listing_id,
@@ -254,7 +255,7 @@ class AssessmentRepository:
                 score=(Decimal(str(result.total_score)) if result.total_score is not None else None),
                 risks={"reasons": list(result.reasons)},
                 rationale="; ".join(result.reasons) or None,
-                input_payload=evaluation_input.model_dump(mode="json"),
+                input_payload=canonical_input.model_dump(mode="json"),
                 result_payload=result.model_dump(mode="json"),
                 created_at=datetime.now(UTC),
             )

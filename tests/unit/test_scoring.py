@@ -79,6 +79,28 @@ def test_evidence_free_zero_score_input_is_not_recommendable_without_minimum_evi
     assert "minimum_evidence_not_met" in result.reasons
 
 
+def test_minimum_evidence_gate_cannot_be_true_without_any_evidence_ids() -> None:
+    with pytest.raises(ValidationError, match="minimum_evidence_met"):
+        make_input(
+            liquidity=0,
+            commute=0,
+            price=0,
+            residential=0,
+            confidence=100,
+            minimum_evidence_met=True,
+            evidence_ids_by_dimension={},
+        )
+
+
+def test_minimum_evidence_gate_can_remain_false_when_evidence_exists() -> None:
+    result = evaluate_listing(make_input(minimum_evidence_met=False, confidence=100))
+
+    assert result.eligible is False
+    assert result.recommendable is False
+    assert result.total_score is None
+    assert "minimum_evidence_not_met" in result.reasons
+
+
 def test_default_weighted_score() -> None:
     result = evaluate_listing(
         make_input(

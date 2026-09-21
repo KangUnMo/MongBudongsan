@@ -60,6 +60,13 @@ class EvaluationInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_evidence(self) -> EvaluationInput:
+        evidence_ids = tuple(
+            evidence_id
+            for dimension in DIMENSIONS
+            for evidence_id in getattr(self.evidence_ids_by_dimension, dimension)
+        )
+        if self.minimum_evidence_met and not evidence_ids:
+            raise ValueError("minimum_evidence_met requires at least one evidence ID")
         for dimension in DIMENSIONS:
             score = getattr(self, dimension)
             if score > 0 and not getattr(self.evidence_ids_by_dimension, dimension):

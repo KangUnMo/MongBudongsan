@@ -196,6 +196,48 @@ def test_assessment_repository_rejects_evidence_outside_assessment_scope(
         assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 0
 
 
+def test_assessment_repository_rejects_true_minimum_evidence_gate_without_evidence(
+    database,
+) -> None:  # type: ignore[no-untyped-def]
+    request = SearchRequest(
+        request_id="req-assessment-empty-evidence",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(minimum=Decimal(1), maximum=Decimal(2)),
+    )
+    RequestRepository(database).save_version(request)
+    run_id = "run-assessment-empty-evidence"
+    RunRepository(database).create(run_id, request.request_id, request.version)
+    with database.session() as session:
+        listing = ListingModel(
+            source="fixture",
+            source_listing_id="listing-empty-evidence",
+            created_at=datetime.now(UTC),
+        )
+        session.add(listing)
+        session.flush()
+        listing_id = listing.id
+
+    valid_input = EvaluationInput(
+        required_passed=True,
+        excluded_passed=True,
+        active_listing_confirmed=True,
+        minimum_evidence_met=False,
+        confidence=100,
+    )
+    invalid_input = valid_input.model_copy(update={"minimum_evidence_met": True})
+
+    with pytest.raises(ValueError, match="minimum_evidence_met"):
+        AssessmentRepository(database).save(
+            run_id=run_id,
+            listing_id=listing_id,
+            evaluation_input=invalid_input,
+        )
+
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 0
+
+
 def _seed_assessment_context(database, suffix: str) -> tuple[str, int, tuple[int, ...]]:  # type: ignore[no-untyped-def]
     request = SearchRequest(
         request_id=f"req-assessment-{suffix}",
