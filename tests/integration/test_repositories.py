@@ -8,9 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
-from mybudongsan.domain.scoring import EvaluationInput, evaluate_listing
+from mybudongsan.domain.scoring import EvaluationInput, EvaluationResult, evaluate_listing
 from mybudongsan.storage.models import (
     AssessmentModel,
+    EvidenceModel,
     ListingModel,
     ListingSnapshotModel,
     ResearchRunModel,
@@ -107,30 +108,157 @@ def test_assessment_repository_round_trips_complete_evaluation_json(database) ->
         session.add(listing)
         session.flush()
         listing_id = listing.id
+        evidence_ids = _add_evidence(session, "run-assessment", listing_id, count=4)
 
     evaluation_input = EvaluationInput(
         required_passed=True,
         excluded_passed=True,
+        active_listing_confirmed=True,
+        minimum_evidence_met=True,
         liquidity=80,
         commute=70,
         price=90,
         residential=60,
         confidence=89,
         evidence_ids_by_dimension={
-            "liquidity": [101],
-            "commute": [102],
-            "price": [103],
-            "residential": [104],
+            "liquidity": [evidence_ids[0]],
+            "commute": [evidence_ids[1]],
+            "price": [evidence_ids[2]],
+            "residential": [evidence_ids[3]],
         },
     )
-    evaluation_result = evaluate_listing(evaluation_input)
     AssessmentRepository(database).save(
         run_id="run-assessment",
         listing_id=listing_id,
         evaluation_input=evaluation_input,
-        evaluation_result=evaluation_result,
     )
 
     loaded = AssessmentRepository(database).get("run-assessment", listing_id)
     assert loaded.evaluation_input == evaluation_input
-    assert loaded.evaluation_result == evaluation_result
+    assert loaded.evaluation_result == evaluate_listing(evaluation_input)
+
+
+def test_assessment_repository_recomputes_canonical_result_and_rejects_forged_result(
+    database,
+) -> None:  # type: ignore[no-untyped-def]
+    run_id, listing_id, evidence_ids = _seed_assessment_context(database, "canonical")
+    evaluation_input = _evaluation_input(evidence_ids[:4])
+    forged_result = EvaluationResult(
+        eligible=True,
+        recommendable=True,
+        total_score=100.0,
+        confidence=100,
+        reasons=[],
+    )
+
+    with pytest.raises(TypeError):
+        AssessmentRepository(database).save(
+            run_id=run_id,
+            listing_id=listing_id,
+            evaluation_input=evaluation_input,
+            evaluation_result=forged_result,
+        )
+
+    saved = AssessmentRepository(database).save(
+        run_id=run_id,
+        listing_id=listing_id,
+        evaluation_input=evaluation_input,
+    )
+    assert saved.evaluation_result == evaluate_listing(evaluation_input)
+
+
+@pytest.mark.parametrize(
+    ("evidence_kind", "message"),
+    [
+        ("missing", "evidence not found"),
+        ("wrong_run", "does not belong to run"),
+        ("other_listing", "linked to a different listing"),
+    ],
+)
+def test_assessment_repository_rejects_evidence_outside_assessment_scope(
+    database, evidence_kind: str, message: str
+) -> None:  # type: ignore[no-untyped-def]
+    run_id, listing_id, evidence_ids = _seed_assessment_context(database, evidence_kind)
+    invalid_id = {
+        "missing": 999999,
+        "wrong_run": evidence_ids[4],
+        "other_listing": evidence_ids[5],
+    }[evidence_kind]
+
+    with pytest.raises(ValueError, match=message):
+        AssessmentRepository(database).save(
+            run_id=run_id,
+            listing_id=listing_id,
+            evaluation_input=_evaluation_input((invalid_id,) * 4),
+        )
+
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 0
+
+
+def _seed_assessment_context(database, suffix: str) -> tuple[str, int, tuple[int, ...]]:  # type: ignore[no-untyped-def]
+    request = SearchRequest(
+        request_id=f"req-assessment-{suffix}",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(minimum=Decimal(1), maximum=Decimal(2)),
+    )
+    RequestRepository(database).save_version(request)
+    run_id = f"run-assessment-{suffix}"
+    RunRepository(database).create(run_id, request.request_id, request.version)
+    other_run_id = f"other-run-{suffix}"
+    RunRepository(database).create(other_run_id, request.request_id, request.version)
+    with database.session() as session:
+        listing = ListingModel(
+            source="fixture",
+            source_listing_id=f"listing-{suffix}",
+            created_at=datetime.now(UTC),
+        )
+        other_listing = ListingModel(
+            source="fixture",
+            source_listing_id=f"other-listing-{suffix}",
+            created_at=datetime.now(UTC),
+        )
+        session.add_all((listing, other_listing))
+        session.flush()
+        valid_ids = _add_evidence(session, run_id, listing.id, count=4)
+        wrong_run_ids = _add_evidence(session, other_run_id, None, count=1)
+        other_listing_ids = _add_evidence(session, run_id, other_listing.id, count=1)
+    return run_id, listing.id, (*valid_ids, *wrong_run_ids, *other_listing_ids)
+
+
+def _evaluation_input(evidence_ids: tuple[int, ...]) -> EvaluationInput:
+    return EvaluationInput(
+        required_passed=True,
+        excluded_passed=True,
+        active_listing_confirmed=True,
+        minimum_evidence_met=True,
+        liquidity=80,
+        commute=70,
+        price=90,
+        residential=60,
+        confidence=90,
+        evidence_ids_by_dimension={dimension: [evidence_id] for dimension, evidence_id in zip(
+            ("liquidity", "commute", "price", "residential"), evidence_ids, strict=True
+        )},
+    )
+
+
+def _add_evidence(
+    session, run_id: str, listing_id: int | None, *, count: int
+) -> tuple[int, ...]:  # type: ignore[no-untyped-def]
+    evidence = [
+        EvidenceModel(
+            run_id=run_id,
+            listing_id=listing_id,
+            claim=f"claim-{index}",
+            source_url=f"https://example.test/{run_id}/{index}",
+            source_type="fixture",
+            excerpt=None,
+            accessed_at=datetime.now(UTC),
+        )
+        for index in range(count)
+    ]
+    session.add_all(evidence)
+    session.flush()
+    return tuple(item.id for item in evidence)

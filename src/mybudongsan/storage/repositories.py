@@ -20,7 +20,12 @@ from mybudongsan.domain.runs import (
     RunStatus,
     validate_transition,
 )
-from mybudongsan.domain.scoring import EvaluationInput, EvaluationResult, evaluate_listing
+from mybudongsan.domain.scoring import (
+    DIMENSIONS,
+    EvaluationInput,
+    EvaluationResult,
+    evaluate_listing,
+)
 from mybudongsan.research.contracts import ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import (
@@ -236,10 +241,12 @@ class AssessmentRepository:
         run_id: str,
         listing_id: int,
         evaluation_input: EvaluationInput,
-        evaluation_result: EvaluationResult | None = None,
     ) -> AssessmentRecord:
-        result = evaluation_result or evaluate_listing(evaluation_input)
         with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            self._require_listing(session, listing_id)
+            self._validate_evidence_ownership(session, run_id, listing_id, evaluation_input)
+            result = evaluate_listing(evaluation_input)
             assessment = AssessmentModel(
                 run_id=run_id,
                 listing_id=listing_id,
@@ -255,21 +262,6 @@ class AssessmentRepository:
             session.flush()
             return self._to_record(assessment)
 
-    def save_evaluation(
-        self,
-        *,
-        run_id: str,
-        listing_id: int,
-        evaluation_input: EvaluationInput,
-        evaluation_result: EvaluationResult | None = None,
-    ) -> AssessmentRecord:
-        return self.save(
-            run_id=run_id,
-            listing_id=listing_id,
-            evaluation_input=evaluation_input,
-            evaluation_result=evaluation_result,
-        )
-
     def get(self, run_id: str, listing_id: int) -> AssessmentRecord:
         with self._database.session() as session:
             assessment = session.scalar(
@@ -281,6 +273,49 @@ class AssessmentRepository:
             if assessment is None:
                 raise ValueError(f"assessment not found: {run_id}/{listing_id}")
             return self._to_record(assessment)
+
+    @staticmethod
+    def _require_listing(session: Session, listing_id: int) -> None:
+        listing_exists = session.scalar(select(ListingModel.id).where(ListingModel.id == listing_id))
+        if listing_exists is None:
+            raise ValueError(f"listing not found: {listing_id}")
+
+    @staticmethod
+    def _validate_evidence_ownership(
+        session: Session,
+        run_id: str,
+        listing_id: int,
+        evaluation_input: EvaluationInput,
+    ) -> None:
+        evidence_ids = tuple(
+            evidence_id
+            for dimension in DIMENSIONS
+            for evidence_id in getattr(evaluation_input.evidence_ids_by_dimension, dimension)
+        )
+        if not evidence_ids:
+            return
+        evidence_by_id = {
+            evidence.id: evidence
+            for evidence in session.scalars(
+                select(EvidenceModel).where(EvidenceModel.id.in_(evidence_ids))
+            )
+        }
+        missing_ids = sorted(set(evidence_ids) - evidence_by_id.keys())
+        if missing_ids:
+            raise ValueError(f"evidence not found: {missing_ids}")
+        evidence = tuple(evidence_by_id[evidence_id] for evidence_id in evidence_ids)
+        wrong_run_ids = sorted(item.id for item in evidence if item.run_id != run_id)
+        if wrong_run_ids:
+            raise ValueError(f"evidence does not belong to run {run_id}: {wrong_run_ids}")
+        other_listing_ids = sorted(
+            item.id
+            for item in evidence
+            if item.listing_id is not None and item.listing_id != listing_id
+        )
+        if other_listing_ids:
+            raise ValueError(
+                f"evidence linked to a different listing: {other_listing_ids}"
+            )
 
     @staticmethod
     def _to_record(assessment: AssessmentModel) -> AssessmentRecord:
