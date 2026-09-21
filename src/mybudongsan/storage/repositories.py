@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
+from sqlalchemy.orm import Session
 
+from mybudongsan.domain.listings import (
+    build_coarse_fallback_fingerprint,
+    build_listing_key,
+)
 from mybudongsan.domain.requests import SearchRequest
 from mybudongsan.domain.runs import (
     InvalidTransition,
@@ -14,8 +19,15 @@ from mybudongsan.domain.runs import (
     RunStatus,
     validate_transition,
 )
+from mybudongsan.research.contracts import ListingObservation
 from mybudongsan.storage.database import Database
-from mybudongsan.storage.models import ResearchRunModel, SearchRequestModel
+from mybudongsan.storage.models import (
+    EvidenceModel,
+    ListingModel,
+    ListingSnapshotModel,
+    ResearchRunModel,
+    SearchRequestModel,
+)
 
 
 class RequestRepository:
@@ -54,6 +66,100 @@ class RequestRepository:
             if stored is None:
                 raise ValueError(f"request version not found: {request_id}/{version}")
             return SearchRequest.model_validate(stored.payload)
+
+
+@dataclass(frozen=True)
+class ListingUpsertResult:
+    listing_id: int
+    created: bool
+    duplicate_suspected: bool
+
+
+class ListingRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def upsert_snapshot(
+        self,
+        run_id: str,
+        observation: ListingObservation,
+    ) -> ListingUpsertResult:
+        listing_key = build_listing_key(observation)
+        stored_source_id = listing_key.removeprefix(f"{observation.source}:")
+        with self._database.session() as session:
+            listing = session.scalar(
+                select(ListingModel).where(
+                    ListingModel.source == observation.source,
+                    ListingModel.source_listing_id == stored_source_id,
+                )
+            )
+            created = listing is None
+            if listing is None:
+                listing = ListingModel(
+                    source=observation.source,
+                    source_listing_id=stored_source_id,
+                    created_at=observation.observed_at,
+                )
+                session.add(listing)
+                session.flush()
+            assert listing is not None
+            duplicate_suspected = observation.source_listing_id is None and created and (
+                self._has_uncertain_fallback_match(session, observation, listing.id)
+            )
+            session.add(
+                ListingSnapshotModel(
+                    listing_id=listing.id,
+                    asking_price=observation.asking_price,
+                    status=observation.status,
+                    payload={
+                        **observation.model_dump(mode="json"),
+                        "coarse_fallback_fingerprint": build_coarse_fallback_fingerprint(observation),
+                    },
+                    observed_at=observation.observed_at,
+                )
+            )
+            if observation.raw_evidence_ids:
+                evidence = session.scalars(
+                    select(EvidenceModel).where(
+                        EvidenceModel.run_id == run_id,
+                        EvidenceModel.id.in_(observation.raw_evidence_ids),
+                    )
+                )
+                for item in evidence:
+                    item.listing_id = listing.id
+            session.flush()
+            return ListingUpsertResult(
+                listing_id=listing.id,
+                created=created,
+                duplicate_suspected=duplicate_suspected,
+            )
+
+    @staticmethod
+    def _has_uncertain_fallback_match(
+        session: Session,
+        observation: ListingObservation,
+        listing_id: int,
+    ) -> bool:
+        candidates = session.scalars(
+            select(ListingModel).where(
+                ListingModel.source == observation.source,
+                ListingModel.source_listing_id.startswith("fallback:"),
+                ListingModel.id != listing_id,
+            )
+        )
+        coarse_fingerprint = build_coarse_fallback_fingerprint(observation)
+        for candidate in candidates:
+            snapshot = session.scalar(
+                select(ListingSnapshotModel)
+                .where(ListingSnapshotModel.listing_id == candidate.id)
+                .order_by(desc(ListingSnapshotModel.observed_at), desc(ListingSnapshotModel.id))
+            )
+            if (
+                snapshot is not None
+                and snapshot.payload.get("coarse_fallback_fingerprint") == coarse_fingerprint
+            ):
+                return True
+        return False
 
 
 @dataclass(frozen=True)
