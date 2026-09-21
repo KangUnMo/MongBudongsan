@@ -9,7 +9,7 @@ from mybudongsan.domain.runs import (
     RunStage,
     RunStatus,
 )
-from mybudongsan.storage.repositories import RunRecord, RunRepository
+from mybudongsan.storage.repositories import RequestRepository, RunRecord, RunRepository
 
 
 @dataclass(frozen=True)
@@ -20,22 +20,20 @@ class ResumePoint:
 
 
 class ResearchRunService:
-    def __init__(self, run_repository: RunRepository) -> None:
+    def __init__(
+        self, request_repository: RequestRepository, run_repository: RunRepository
+    ) -> None:
+        self._request_repository = request_repository
         self._run_repository = run_repository
 
     def start(self, run_id: str, request: SearchRequest) -> RunRecord:
-        if request.status is not RequestStatus.APPROVED:
+        persisted_request = self._request_repository.get_version(request.request_id, request.version)
+        if persisted_request.status is not RequestStatus.APPROVED:
             raise ValueError("research runs require an approved request version")
         return self._run_repository.create(
             run_id=run_id,
-            request_id=request.request_id,
-            request_version=request.version,
-            status=RunStatus.RUNNING,
-            current_stage=RunStage.REQUEST_APPROVED,
-            checkpoint={
-                "request_id": request.request_id,
-                "request_version": request.version,
-            },
+            request_id=persisted_request.request_id,
+            request_version=persisted_request.version,
         )
 
     def advance(

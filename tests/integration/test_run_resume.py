@@ -25,8 +25,9 @@ def approved_request() -> SearchRequest:
 def test_advance_rejects_skipping_from_request_approval(
     database, approved_request: SearchRequest
 ) -> None:  # type: ignore[no-untyped-def]
-    RequestRepository(database).save_version(approved_request)
-    service = ResearchRunService(RunRepository(database))
+    request_repository = RequestRepository(database)
+    request_repository.save_version(approved_request)
+    service = ResearchRunService(request_repository, RunRepository(database))
     service.start("run-skip", approved_request)
 
     with pytest.raises(InvalidTransition, match="expected discovery_complete"):
@@ -36,9 +37,10 @@ def test_advance_rejects_skipping_from_request_approval(
 def test_transient_failure_is_resumable_and_resume_skips_completed_checkpoints(
     database, approved_request: SearchRequest
 ) -> None:  # type: ignore[no-untyped-def]
-    RequestRepository(database).save_version(approved_request)
+    request_repository = RequestRepository(database)
+    request_repository.save_version(approved_request)
     repository = RunRepository(database)
-    service = ResearchRunService(repository)
+    service = ResearchRunService(request_repository, repository)
     service.start("run-resume", approved_request)
 
     first = service.advance(
@@ -52,10 +54,15 @@ def test_transient_failure_is_resumable_and_resume_skips_completed_checkpoints(
             select(ResearchRunModel).where(ResearchRunModel.run_id == "run-resume")
         )
     assert stored_run is not None
-    assert stored_run.checkpoint_payload == {
-        "checkpoint": {"discovered_listing_ids": ["listing-1", "listing-2"]},
-        "idempotency_key": "run-resume:discovery_complete",
+    stored_history = stored_run.checkpoint_payload["stages"]
+    assert isinstance(stored_history, dict)
+    assert stored_history["discovery_complete"]["checkpoint"] == {
+        "discovered_listing_ids": ["listing-1", "listing-2"]
     }
+    assert (
+        stored_history["discovery_complete"]["idempotency_key"]
+        == "run-resume:discovery_complete"
+    )
 
     repeated = service.advance(
         "run-resume",
@@ -78,3 +85,71 @@ def test_transient_failure_is_resumable_and_resume_skips_completed_checkpoints(
     assert resume_point.run_id == "run-resume"
     assert resume_point.next_stage is RunStage.VERIFICATION_COMPLETE
     assert resume_point.checkpoint == {"candidate_count": 1}
+
+
+def test_start_rejects_forged_approved_request_when_persisted_version_is_draft(
+    database, approved_request: SearchRequest
+) -> None:  # type: ignore[no-untyped-def]
+    persisted_draft = approved_request.model_copy(update={"status": RequestStatus.DRAFT})
+    request_repository = RequestRepository(database)
+    request_repository.save_version(persisted_draft)
+    service = ResearchRunService(request_repository, RunRepository(database))
+
+    with pytest.raises(ValueError, match="approved"):
+        service.start("run-forged", approved_request)
+
+
+def test_delayed_duplicate_returns_its_original_checkpoint_without_rewinding_progress(
+    database, approved_request: SearchRequest
+) -> None:  # type: ignore[no-untyped-def]
+    RequestRepository(database).save_version(approved_request)
+    repository = RunRepository(database)
+    repository.create("run-history", approved_request.request_id, approved_request.version)
+    discovery_checkpoint = {"discovered_listing_ids": ["listing-1"]}
+    repository.advance(
+        run_id="run-history",
+        stage=RunStage.DISCOVERY_COMPLETE,
+        checkpoint=discovery_checkpoint,
+    )
+    repository.advance(
+        run_id="run-history",
+        stage=RunStage.FILTER_COMPLETE,
+        checkpoint={"candidate_count": 1},
+    )
+
+    duplicate = repository.advance(
+        run_id="run-history",
+        stage=RunStage.DISCOVERY_COMPLETE,
+        checkpoint={"discovered_listing_ids": ["must-not-replace"]},
+    )
+    current = repository.get("run-history")
+
+    assert duplicate.current_stage is RunStage.FILTER_COMPLETE
+    assert duplicate.checkpoint == discovery_checkpoint
+    assert current.current_stage is RunStage.FILTER_COMPLETE
+    assert current.checkpoint == {"candidate_count": 1}
+    assert set(current.checkpoints) == {
+        RunStage.REQUEST_APPROVED,
+        RunStage.DISCOVERY_COMPLETE,
+        RunStage.FILTER_COMPLETE,
+    }
+    assert current.checkpoints[RunStage.DISCOVERY_COMPLETE].checkpoint == discovery_checkpoint
+    assert (
+        current.checkpoints[RunStage.DISCOVERY_COMPLETE].idempotency_key
+        == "run-history:discovery_complete"
+    )
+
+
+def test_create_does_not_accept_an_arbitrary_status_or_stage(
+    database, approved_request: SearchRequest
+) -> None:  # type: ignore[no-untyped-def]
+    RequestRepository(database).save_version(approved_request)
+
+    with pytest.raises(TypeError):
+        RunRepository(database).create(  # type: ignore[call-arg]
+            "run-invalid-create",
+            approved_request.request_id,
+            approved_request.version,
+            status=RunStatus.RESUMABLE,
+            current_stage=RunStage.FILTER_COMPLETE,
+        )
