@@ -107,6 +107,8 @@ class AssessmentModel(Base):
     score: Mapped[Decimal | None] = mapped_column(Numeric)
     risks: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     rationale: Mapped[str | None] = mapped_column(Text)
+    input_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

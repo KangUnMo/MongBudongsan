@@ -85,6 +85,8 @@ def upgrade() -> None:
         sa.Column("score", sa.Numeric(), nullable=True),
         sa.Column("risks", sa.JSON(), nullable=True),
         sa.Column("rationale", sa.Text(), nullable=True),
+        sa.Column("input_payload", sa.JSON(), nullable=False),
+        sa.Column("result_payload", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["listing_id"], ["listings.id"]),
         sa.ForeignKeyConstraint(["run_id"], ["research_runs.run_id"]),

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import get_type_hints
 
@@ -7,8 +8,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
-from mybudongsan.storage.models import AssessmentModel, ListingSnapshotModel, ResearchRunModel
-from mybudongsan.storage.repositories import RequestRepository, RunRepository
+from mybudongsan.domain.scoring import EvaluationInput, evaluate_listing
+from mybudongsan.storage.models import (
+    AssessmentModel,
+    ListingModel,
+    ListingSnapshotModel,
+    ResearchRunModel,
+)
+from mybudongsan.storage.repositories import AssessmentRepository, RequestRepository, RunRepository
 
 
 def test_request_versions_are_immutable(database) -> None:  # type: ignore[no-untyped-def]
@@ -79,3 +86,51 @@ def test_missing_request_run_rolls_back_and_database_remains_usable(database) ->
             select(ResearchRunModel).where(ResearchRunModel.run_id == "run-valid")
         )
     assert run is not None
+
+
+def test_assessment_repository_round_trips_complete_evaluation_json(database) -> None:  # type: ignore[no-untyped-def]
+    request = SearchRequest(
+        request_id="req-assessment",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(minimum=Decimal(1), maximum=Decimal(2)),
+    )
+    RequestRepository(database).save_version(request)
+    RunRepository(database).create("run-assessment", request.request_id, request.version)
+
+    with database.session() as session:
+        listing = ListingModel(
+            source="fixture",
+            source_listing_id="listing-1",
+            created_at=datetime.now(UTC),
+        )
+        session.add(listing)
+        session.flush()
+        listing_id = listing.id
+
+    evaluation_input = EvaluationInput(
+        required_passed=True,
+        excluded_passed=True,
+        liquidity=80,
+        commute=70,
+        price=90,
+        residential=60,
+        confidence=89,
+        evidence_ids_by_dimension={
+            "liquidity": [101],
+            "commute": [102],
+            "price": [103],
+            "residential": [104],
+        },
+    )
+    evaluation_result = evaluate_listing(evaluation_input)
+    AssessmentRepository(database).save(
+        run_id="run-assessment",
+        listing_id=listing_id,
+        evaluation_input=evaluation_input,
+        evaluation_result=evaluation_result,
+    )
+
+    loaded = AssessmentRepository(database).get("run-assessment", listing_id)
+    assert loaded.evaluation_input == evaluation_input
+    assert loaded.evaluation_result == evaluation_result

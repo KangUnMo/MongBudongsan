@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import MappingProxyType
 
 from sqlalchemy import desc, select
@@ -19,9 +20,11 @@ from mybudongsan.domain.runs import (
     RunStatus,
     validate_transition,
 )
+from mybudongsan.domain.scoring import EvaluationInput, EvaluationResult, evaluate_listing
 from mybudongsan.research.contracts import ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import (
+    AssessmentModel,
     EvidenceModel,
     ListingModel,
     ListingSnapshotModel,
@@ -210,6 +213,84 @@ class ListingRepository:
             ):
                 return True
         return False
+
+
+@dataclass(frozen=True)
+class AssessmentRecord:
+    run_id: str
+    listing_id: int
+    evaluation_input: EvaluationInput
+    evaluation_result: EvaluationResult
+    created_at: datetime
+
+
+class AssessmentRepository:
+    """Persist an assessment together with all data needed to explain it."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def save(
+        self,
+        *,
+        run_id: str,
+        listing_id: int,
+        evaluation_input: EvaluationInput,
+        evaluation_result: EvaluationResult | None = None,
+    ) -> AssessmentRecord:
+        result = evaluation_result or evaluate_listing(evaluation_input)
+        with self._database.session() as session:
+            assessment = AssessmentModel(
+                run_id=run_id,
+                listing_id=listing_id,
+                passed_gates=result.eligible,
+                score=(Decimal(str(result.total_score)) if result.total_score is not None else None),
+                risks={"reasons": list(result.reasons)},
+                rationale="; ".join(result.reasons) or None,
+                input_payload=evaluation_input.model_dump(mode="json"),
+                result_payload=result.model_dump(mode="json"),
+                created_at=datetime.now(UTC),
+            )
+            session.add(assessment)
+            session.flush()
+            return self._to_record(assessment)
+
+    def save_evaluation(
+        self,
+        *,
+        run_id: str,
+        listing_id: int,
+        evaluation_input: EvaluationInput,
+        evaluation_result: EvaluationResult | None = None,
+    ) -> AssessmentRecord:
+        return self.save(
+            run_id=run_id,
+            listing_id=listing_id,
+            evaluation_input=evaluation_input,
+            evaluation_result=evaluation_result,
+        )
+
+    def get(self, run_id: str, listing_id: int) -> AssessmentRecord:
+        with self._database.session() as session:
+            assessment = session.scalar(
+                select(AssessmentModel).where(
+                    AssessmentModel.run_id == run_id,
+                    AssessmentModel.listing_id == listing_id,
+                )
+            )
+            if assessment is None:
+                raise ValueError(f"assessment not found: {run_id}/{listing_id}")
+            return self._to_record(assessment)
+
+    @staticmethod
+    def _to_record(assessment: AssessmentModel) -> AssessmentRecord:
+        return AssessmentRecord(
+            run_id=assessment.run_id,
+            listing_id=assessment.listing_id,
+            evaluation_input=EvaluationInput.model_validate(assessment.input_payload),
+            evaluation_result=EvaluationResult.model_validate(assessment.result_payload),
+            created_at=assessment.created_at,
+        )
 
 
 @dataclass(frozen=True)
