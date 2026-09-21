@@ -22,6 +22,12 @@
 | --- | --- | ---: | ---: | ---: | --- | --- |
 {% for candidate in bundle.candidates %}| {{ candidate.scenario.value if candidate.scenario else "" }} | {{ candidate.listing.complex_name or candidate.candidate_id }} | {{ format_money(candidate.listing.asking_price) }} | {{ candidate.assessment.total_score if candidate.assessment.total_score is not none else "" }} | {{ candidate.assessment.confidence }} | {{ candidate.listing.status or "" }} | {{ candidate.evidence_ids | join(", ") }} |
 {% endfor %}
+## 후보별 추천·보류·제외 사유
+
+| 후보 | 추천 가능 | 평가 사유 |
+| --- | --- | --- |
+{% for candidate in bundle.candidates %}| {{ candidate.listing.complex_name or candidate.candidate_id }} | {{ candidate.assessment.recommendable | lower }} | {{ candidate.assessment.reasons | join(", ") }} |
+{% endfor %}
 ## 가격과 실거래
 
 {% for candidate, finding in findings_by_section["가격과 실거래"] %}- {{ candidate.listing.complex_name or candidate.candidate_id }}: {{ finding.text }} (근거: {{ finding.evidence_ids | join(", ") }})

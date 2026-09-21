@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
+import tempfile
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -149,48 +151,78 @@ class ReportRenderer:
     )
 
     def render(self, bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
-        directory = (
-            output_root
+        artifacts = self._final_artifacts(bundle, output_root)
+        self._ensure_artifacts_are_new(artifacts)
+        artifacts.directory.parent.mkdir(parents=True, exist_ok=True)
+        temporary_directory = Path(
+            tempfile.mkdtemp(
+                prefix=f".{artifacts.directory.name}.",
+                suffix=".tmp",
+                dir=artifacts.directory.parent,
+            )
+        )
+        temporary_artifacts = RenderedArtifacts(
+            directory=temporary_directory,
+            report_path=temporary_directory / "report.md",
+            candidates_path=temporary_directory / "candidates.csv",
+            run_data_path=temporary_directory / "run-data.json",
+        )
+
+        try:
+            context = self._template_context(bundle)
+            temporary_artifacts.report_path.write_text(
+                self._environment.get_template("report.md.j2").render(**context),
+                encoding="utf-8",
+            )
+            self._write_candidates_csv(temporary_artifacts.candidates_path, bundle.candidates)
+            temporary_artifacts.run_data_path.write_text(
+                json.dumps(
+                    bundle.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self._publish(temporary_directory, artifacts.directory)
+        except BaseException:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+            raise
+        return artifacts
+
+    @staticmethod
+    def _ensure_artifacts_are_new(artifacts: RenderedArtifacts) -> None:
+        if artifacts.directory.exists():
+            raise FileExistsError(f"immutable artifact directory already exists: {artifacts.directory}")
+
+    @staticmethod
+    def _publish(temporary_directory: Path, final_directory: Path) -> None:
+        if final_directory.exists():
+            raise FileExistsError(f"immutable artifact directory already exists: {final_directory}")
+        temporary_directory.rename(final_directory)
+
+    @staticmethod
+    def _final_artifacts(bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
+        _validate_path_component(bundle.request.request_id, "request_id")
+        _validate_path_component(bundle.run.slug, "slug")
+        resolved_root = output_root.resolve()
+        parent = (
+            resolved_root
             / f"{bundle.run.completed_at.year:04d}"
             / f"{bundle.run.completed_at.month:02d}"
-            / f"{bundle.request.request_id}_{bundle.run.slug}"
         )
-        artifacts = RenderedArtifacts(
+        directory = parent / f"{bundle.request.request_id}_{bundle.run.slug}"
+        try:
+            directory.relative_to(resolved_root)
+        except ValueError as error:
+            raise ValueError("report output directory must remain under output_root") from error
+        return RenderedArtifacts(
             directory=directory,
             report_path=directory / "report.md",
             candidates_path=directory / "candidates.csv",
             run_data_path=directory / "run-data.json",
         )
-        self._ensure_artifacts_are_new(artifacts)
-        directory.mkdir(parents=True, exist_ok=True)
-
-        context = self._template_context(bundle)
-        artifacts.report_path.write_text(
-            self._environment.get_template("report.md.j2").render(**context),
-            encoding="utf-8",
-        )
-        self._write_candidates_csv(artifacts.candidates_path, bundle.candidates)
-        artifacts.run_data_path.write_text(
-            json.dumps(
-                bundle.model_dump(mode="json"),
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return artifacts
-
-    @staticmethod
-    def _ensure_artifacts_are_new(artifacts: RenderedArtifacts) -> None:
-        existing = [
-            path.name
-            for path in (artifacts.report_path, artifacts.candidates_path, artifacts.run_data_path)
-            if path.exists()
-        ]
-        if existing:
-            raise FileExistsError(f"immutable artifacts already exist: {', '.join(existing)}")
 
     @staticmethod
     def _template_context(bundle: ReportBundle) -> dict[str, object]:
@@ -263,3 +295,10 @@ def _format_datetime(value: datetime) -> str:
 
 def _format_money(value: object | None) -> str:
     return "" if value is None else str(value)
+
+
+def _validate_path_component(value: str, name: str) -> None:
+    if not value or not value.strip() or value in {".", ".."} or "\x00" in value:
+        raise ValueError(f"unsafe {name} for report output path")
+    if "/" in value or "\\" in value:
+        raise ValueError(f"unsafe {name} for report output path")

@@ -193,6 +193,9 @@ def test_renderer_writes_deterministic_evidence_backed_artifacts(tmp_path: Path)
     ]
     report = artifacts.report_path.read_text(encoding="utf-8")
     assert all(heading in report for heading in required_headings)
+    assert "후보별 추천·보류·제외 사유" in report
+    assert "| 강서 한강뷰 | true |  |" in report
+    assert "| 가양 안정마을 | true |  |" in report
 
 
 def test_renderer_does_not_assign_a_scenario_to_unqualified_candidates(tmp_path: Path) -> None:
@@ -218,7 +221,9 @@ def test_renderer_does_not_assign_a_scenario_to_unqualified_candidates(tmp_path:
     artifacts = ReportRenderer().render(bundle, tmp_path)
 
     assert _read_csv(artifacts.candidates_path)[0]["scenario"] == ""
-    assert "추천 없음" in artifacts.report_path.read_text(encoding="utf-8")
+    report = artifacts.report_path.read_text(encoding="utf-8")
+    assert "추천 없음" in report
+    assert "confidence_below_85" in report
 
 
 def test_renderer_supports_an_empty_final_candidate_set(tmp_path: Path) -> None:
@@ -228,6 +233,62 @@ def test_renderer_supports_an_empty_final_candidate_set(tmp_path: Path) -> None:
 
     assert _read_csv(artifacts.candidates_path) == []
     assert "추천 없음" in artifacts.report_path.read_text(encoding="utf-8")
+
+
+def test_renderer_leaves_no_partial_final_directory_when_writing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renderer = ReportRenderer()
+
+    def fail_write(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated csv write failure")
+
+    monkeypatch.setattr(renderer, "_write_candidates_csv", fail_write)
+
+    with pytest.raises(OSError, match="simulated csv write failure"):
+        renderer.render(_bundle(), tmp_path)
+
+    _assert_no_published_or_temporary_artifacts(tmp_path)
+
+
+def test_renderer_leaves_no_partial_final_directory_when_publish_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renderer = ReportRenderer()
+
+    def fail_publish(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(renderer, "_publish", fail_publish)
+
+    with pytest.raises(OSError, match="simulated publish failure"):
+        renderer.render(_bundle(), tmp_path)
+
+    _assert_no_published_or_temporary_artifacts(tmp_path)
+
+
+def test_renderer_does_not_overwrite_an_existing_complete_artifact_directory(tmp_path: Path) -> None:
+    renderer = ReportRenderer()
+    artifacts = renderer.render(_bundle(), tmp_path)
+    original_report = artifacts.report_path.read_text(encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="immutable artifact directory"):
+        renderer.render(_bundle(), tmp_path)
+
+    assert artifacts.report_path.read_text(encoding="utf-8") == original_report
+
+
+@pytest.mark.parametrize("request_id", (".", "..", "../escape", "safe/name", r"safe\\name", "\x00"))
+def test_renderer_rejects_unsafe_request_id_before_creating_artifacts(
+    tmp_path: Path, request_id: str
+) -> None:
+    request = _bundle().request.model_copy(update={"request_id": request_id})
+    bundle = _bundle().model_copy(update={"request": request})
+
+    with pytest.raises(ValueError, match="request_id"):
+        ReportRenderer().render(bundle, tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_bundle_rejects_scenario_for_an_unqualified_candidate() -> None:
@@ -385,3 +446,9 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_no_published_or_temporary_artifacts(output_root: Path) -> None:
+    parent = output_root / "2026" / "09"
+    assert not (parent / "req-gangseo_gangseo-family").exists()
+    assert not parent.exists() or list(parent.iterdir()) == []
