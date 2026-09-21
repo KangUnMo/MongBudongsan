@@ -1,14 +1,18 @@
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 
-def test_initial_migration_creates_expected_schema(tmp_path: Path) -> None:
+def test_initial_migration_creates_expected_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project_root = Path(__file__).resolve().parents[2]
     database_path = tmp_path / "migration.sqlite3"
     database_url = f"sqlite+pysqlite:///{database_path}"
+    monkeypatch.setenv("MYBUDONGSAN_DB_URL", database_url)
     alembic_config = Config(str(project_root / "alembic.ini"))
     alembic_config.set_main_option("script_location", str(project_root / "migrations"))
     alembic_config.set_main_option("sqlalchemy.url", database_url)
