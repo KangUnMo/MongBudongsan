@@ -39,6 +39,18 @@ def test_source_listing_id_is_primary_identity() -> None:
     assert build_listing_key(observation) == "naver_land:12345"
 
 
+def test_source_listing_id_is_stripped_before_building_its_primary_key() -> None:
+    observation = make_observation(source_listing_id="  12345  ")
+
+    assert observation.source_listing_id == "12345"
+    assert build_listing_key(observation) == "naver_land:12345"
+
+
+def test_blank_source_listing_id_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        make_observation(source_listing_id="   ")
+
+
 def test_fallback_identity_is_stable_without_source_id() -> None:
     first = make_observation(source_listing_id=None, description="첫 설명")
     second = make_observation(source_listing_id=None, description="다른 설명")

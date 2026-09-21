@@ -79,60 +79,110 @@ class ListingRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
 
-    def upsert_snapshot(
+    def ingest_bundle(
         self,
+        run_id: str,
+        observations: tuple[ListingObservation, ...],
+    ) -> tuple[ListingUpsertResult, ...]:
+        with self._database.session() as session:
+            self._require_run(session, run_id)
+            return tuple(
+                self._upsert_observation(session, run_id, observation)
+                for observation in observations
+            )
+
+    @staticmethod
+    def _require_run(session: Session, run_id: str) -> None:
+        run_exists = session.scalar(
+            select(ResearchRunModel.id).where(ResearchRunModel.run_id == run_id)
+        )
+        if run_exists is None:
+            raise ValueError(f"run not found: {run_id}")
+
+    def _upsert_observation(
+        self,
+        session: Session,
         run_id: str,
         observation: ListingObservation,
     ) -> ListingUpsertResult:
         listing_key = build_listing_key(observation)
         stored_source_id = listing_key.removeprefix(f"{observation.source}:")
-        with self._database.session() as session:
-            listing = session.scalar(
-                select(ListingModel).where(
-                    ListingModel.source == observation.source,
-                    ListingModel.source_listing_id == stored_source_id,
-                )
+        listing = session.scalar(
+            select(ListingModel).where(
+                ListingModel.source == observation.source,
+                ListingModel.source_listing_id == stored_source_id,
             )
-            created = listing is None
-            if listing is None:
-                listing = ListingModel(
-                    source=observation.source,
-                    source_listing_id=stored_source_id,
-                    created_at=observation.observed_at,
-                )
-                session.add(listing)
-                session.flush()
-            assert listing is not None
-            duplicate_suspected = observation.source_listing_id is None and created and (
-                self._has_uncertain_fallback_match(session, observation, listing.id)
+        )
+        created = listing is None
+        if listing is None:
+            listing = ListingModel(
+                source=observation.source,
+                source_listing_id=stored_source_id,
+                created_at=observation.observed_at,
             )
-            session.add(
-                ListingSnapshotModel(
-                    listing_id=listing.id,
-                    asking_price=observation.asking_price,
-                    status=observation.status,
-                    payload={
-                        **observation.model_dump(mode="json"),
-                        "coarse_fallback_fingerprint": build_coarse_fallback_fingerprint(observation),
-                    },
-                    observed_at=observation.observed_at,
-                )
-            )
-            if observation.raw_evidence_ids:
-                evidence = session.scalars(
-                    select(EvidenceModel).where(
-                        EvidenceModel.run_id == run_id,
-                        EvidenceModel.id.in_(observation.raw_evidence_ids),
-                    )
-                )
-                for item in evidence:
-                    item.listing_id = listing.id
+            session.add(listing)
             session.flush()
-            return ListingUpsertResult(
+        assert listing is not None
+        duplicate_suspected = observation.source_listing_id is None and created and (
+            self._has_uncertain_fallback_match(session, observation, listing.id)
+        )
+        evidence = self._validate_evidence_ownership(
+            session,
+            run_id,
+            listing.id,
+            observation.raw_evidence_ids,
+        )
+        session.add(
+            ListingSnapshotModel(
                 listing_id=listing.id,
-                created=created,
-                duplicate_suspected=duplicate_suspected,
+                asking_price=observation.asking_price,
+                status=observation.status,
+                payload={
+                    **observation.model_dump(mode="json"),
+                    "coarse_fallback_fingerprint": build_coarse_fallback_fingerprint(observation),
+                },
+                observed_at=observation.observed_at,
             )
+        )
+        for item in evidence:
+            item.listing_id = listing.id
+        session.flush()
+        return ListingUpsertResult(
+            listing_id=listing.id,
+            created=created,
+            duplicate_suspected=duplicate_suspected,
+        )
+
+    @staticmethod
+    def _validate_evidence_ownership(
+        session: Session,
+        run_id: str,
+        listing_id: int,
+        evidence_ids: tuple[int, ...],
+    ) -> tuple[EvidenceModel, ...]:
+        if not evidence_ids:
+            return ()
+        evidence_by_id = {
+            evidence.id: evidence
+            for evidence in session.scalars(
+                select(EvidenceModel).where(EvidenceModel.id.in_(evidence_ids))
+            )
+        }
+        missing_ids = sorted(set(evidence_ids) - evidence_by_id.keys())
+        if missing_ids:
+            raise ValueError(f"evidence not found: {missing_ids}")
+        evidence = tuple(evidence_by_id[evidence_id] for evidence_id in evidence_ids)
+        wrong_run_ids = sorted(item.id for item in evidence if item.run_id != run_id)
+        if wrong_run_ids:
+            raise ValueError(f"evidence does not belong to run {run_id}: {wrong_run_ids}")
+        reassigned_ids = sorted(
+            item.id
+            for item in evidence
+            if item.listing_id is not None and item.listing_id != listing_id
+        )
+        if reassigned_ids:
+            raise ValueError(f"evidence already linked to a different listing: {reassigned_ids}")
+        return evidence
 
     @staticmethod
     def _has_uncertain_fallback_match(

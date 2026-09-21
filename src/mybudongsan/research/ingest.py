@@ -18,18 +18,11 @@ class ListingIngestService:
         self._listing_repository = listing_repository
 
     def ingest(self, run_id: str, bundle: ResearchBundle) -> IngestSummary:
-        created = 0
-        updated = 0
-        duplicate_suspected = False
-        for observation in _observations(bundle):
-            result = self._listing_repository.upsert_snapshot(run_id, observation)
-            created += int(result.created)
-            updated += int(not result.created)
-            duplicate_suspected = duplicate_suspected or result.duplicate_suspected
+        results = self._listing_repository.ingest_bundle(run_id, _observations(bundle))
         return IngestSummary(
-            created=created,
-            updated=updated,
-            duplicate_suspected=duplicate_suspected,
+            created=sum(result.created for result in results),
+            updated=sum(not result.created for result in results),
+            duplicate_suspected=any(result.duplicate_suspected for result in results),
         )
 
 

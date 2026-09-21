@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import func, select
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
@@ -29,20 +30,19 @@ def make_observation(**overrides: object) -> ListingObservation:
     return ListingObservation.model_validate(values)
 
 
-def create_run(database) -> str:  # type: ignore[no-untyped-def]
+def create_run(database, suffix: str = "primary") -> str:  # type: ignore[no-untyped-def]
     request = SearchRequest(
-        request_id="request-listings",
+        request_id=f"request-listings-{suffix}",
         version=1,
         regions=[RegionCriterion(name="서울 구로구")],
         budget=MoneyRange(minimum=600_000_000, maximum=900_000_000),
     )
     RequestRepository(database).save_version(request)
-    run = RunRepository(database).create("run-listings", request.request_id, request.version)
+    run = RunRepository(database).create(f"run-listings-{suffix}", request.request_id, request.version)
     return run.run_id
 
 
-def test_ingest_upserts_listing_appends_snapshots_and_connects_evidence(database) -> None:  # type: ignore[no-untyped-def]
-    run_id = create_run(database)
+def create_evidence(database, run_id: str) -> int:  # type: ignore[no-untyped-def]
     with database.session() as session:
         evidence = EvidenceModel(
             run_id=run_id,
@@ -55,7 +55,12 @@ def test_ingest_upserts_listing_appends_snapshots_and_connects_evidence(database
         )
         session.add(evidence)
         session.flush()
-        evidence_id = evidence.id
+        return evidence.id
+
+
+def test_ingest_upserts_listing_appends_snapshots_and_connects_evidence(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database)
+    evidence_id = create_evidence(database, run_id)
 
     service = ListingIngestService(ListingRepository(database))
     first = service.ingest(
@@ -80,6 +85,127 @@ def test_ingest_upserts_listing_appends_snapshots_and_connects_evidence(database
     assert snapshot_count == 2
     assert evidence is not None
     assert evidence.listing_id is not None
+
+
+def test_ingest_rejects_unknown_run_before_writing_a_listing(database) -> None:  # type: ignore[no-untyped-def]
+    service = ListingIngestService(ListingRepository(database))
+
+    with pytest.raises(ValueError, match="run not found"):
+        service.ingest("run-missing", ResearchBundle(discovered=(make_observation(),)))
+
+    with database.session() as session:
+        listing_count = session.scalar(select(func.count()).select_from(ListingModel))
+        snapshot_count = session.scalar(select(func.count()).select_from(ListingSnapshotModel))
+    assert listing_count == 0
+    assert snapshot_count == 0
+
+
+def test_ingest_rejects_evidence_from_a_different_run(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database, "first")
+    other_evidence_id = create_evidence(database, create_run(database, "second"))
+    service = ListingIngestService(ListingRepository(database))
+
+    with pytest.raises(ValueError, match="does not belong to run"):
+        service.ingest(
+            run_id,
+            ResearchBundle(discovered=(make_observation(raw_evidence_ids=(other_evidence_id,)),)),
+        )
+
+    with database.session() as session:
+        listing_count = session.scalar(select(func.count()).select_from(ListingModel))
+    assert listing_count == 0
+
+
+def test_ingest_rejects_missing_evidence_explicitly(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database)
+    service = ListingIngestService(ListingRepository(database))
+
+    with pytest.raises(ValueError, match="evidence not found"):
+        service.ingest(
+            run_id,
+            ResearchBundle(discovered=(make_observation(raw_evidence_ids=(999_999,)),)),
+        )
+
+
+def test_ingest_rejects_cross_listing_evidence_reassignment(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database)
+    evidence_id = create_evidence(database, run_id)
+    service = ListingIngestService(ListingRepository(database))
+    service.ingest(
+        run_id,
+        ResearchBundle(discovered=(make_observation(raw_evidence_ids=(evidence_id,)),)),
+    )
+
+    with pytest.raises(ValueError, match="different listing"):
+        service.ingest(
+            run_id,
+            ResearchBundle(
+                discovered=(
+                    make_observation(
+                        source_listing_id="new-listing-id",
+                        raw_evidence_ids=(evidence_id,),
+                    ),
+                )
+            ),
+        )
+
+    with database.session() as session:
+        listing_count = session.scalar(select(func.count()).select_from(ListingModel))
+        snapshot_count = session.scalar(select(func.count()).select_from(ListingSnapshotModel))
+        evidence = session.get(EvidenceModel, evidence_id)
+    assert listing_count == 1
+    assert snapshot_count == 1
+    assert evidence is not None
+    assert evidence.listing_id is not None
+
+
+def test_ingest_allows_evidence_already_connected_to_the_same_listing(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database)
+    evidence_id = create_evidence(database, run_id)
+    service = ListingIngestService(ListingRepository(database))
+    service.ingest(
+        run_id,
+        ResearchBundle(discovered=(make_observation(raw_evidence_ids=(evidence_id,)),)),
+    )
+
+    summary = service.ingest(
+        run_id,
+        ResearchBundle(discovered=(make_observation(raw_evidence_ids=(evidence_id,)),)),
+    )
+
+    assert summary.updated == 1
+    with database.session() as session:
+        snapshot_count = session.scalar(select(func.count()).select_from(ListingSnapshotModel))
+        evidence = session.get(EvidenceModel, evidence_id)
+    assert snapshot_count == 2
+    assert evidence is not None
+    assert evidence.listing_id is not None
+
+
+def test_ingest_rolls_back_the_entire_bundle_when_a_later_evidence_fails(database) -> None:  # type: ignore[no-untyped-def]
+    run_id = create_run(database)
+    evidence_id = create_evidence(database, run_id)
+    service = ListingIngestService(ListingRepository(database))
+
+    with pytest.raises(ValueError, match="evidence not found"):
+        service.ingest(
+            run_id,
+            ResearchBundle(
+                discovered=(
+                    make_observation(raw_evidence_ids=(evidence_id,)),
+                    make_observation(source_listing_id="later", raw_evidence_ids=(999_999,)),
+                )
+            ),
+        )
+
+    with database.session() as session:
+        listing_count = session.scalar(select(func.count()).select_from(ListingModel))
+        snapshot_count = session.scalar(select(func.count()).select_from(ListingSnapshotModel))
+        evidence = session.get(EvidenceModel, evidence_id)
+    assert listing_count == 0
+    assert snapshot_count == 0
+    assert evidence is not None
+    assert evidence.listing_id is None
 
 
 def test_ingest_keeps_uncertain_fallback_match_separate_and_flags_it(database) -> None:  # type: ignore[no-untyped-def]

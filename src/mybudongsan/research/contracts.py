@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ListingObservation(BaseModel):
@@ -25,6 +25,16 @@ class ListingObservation(BaseModel):
     broker: str | None = None
     description: str | None = None
     raw_evidence_ids: tuple[int, ...] = Field(default_factory=tuple)
+
+    @field_validator("source_listing_id")
+    @classmethod
+    def normalize_source_listing_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("source_listing_id must not be blank")
+        return normalized
 
 
 class ResearchBundle(BaseModel):
