@@ -45,9 +45,9 @@ class _ManagedSheets:
             return _Response({"sheets": [{"properties": {"title": title}} for title in self.tabs]})
         sheet_range = kwargs["range"]
         self.get_ranges.append(sheet_range)
-        if sheet_range == "'조사 현황'!A2:A1000":
+        if sheet_range == "'조사 현황'!A2:A":
             return _Response({"values": self.status_keys})
-        if sheet_range == "'추천 결과'!A2:B1000":
+        if sheet_range == "'추천 결과'!A2:B":
             return _Response({"values": self.candidate_keys})
         raise AssertionError(f"unexpected read: {sheet_range}")
 
@@ -93,10 +93,10 @@ def test_sheets_preserves_other_runs_and_clears_a_smaller_resync_tail() -> None:
     projection.sync_run("sheet", _request(), _run("run-1"), [{"candidate_id": "one"}])
 
     assert service.get_ranges[-4:] == [
-        "'조사 현황'!A2:A1000",
-        "'추천 결과'!A2:B1000",
-        "'조사 현황'!A2:A1000",
-        "'추천 결과'!A2:B1000",
+        "'조사 현황'!A2:A",
+        "'추천 결과'!A2:B",
+        "'조사 현황'!A2:A",
+        "'추천 결과'!A2:B",
     ]
     assert service.clears == ["'추천 결과'!A2:K4"]
     all_ranges = [
@@ -130,6 +130,52 @@ def test_sheets_refetches_metadata_after_a_missing_tab_race() -> None:
     SheetsProjection(service).sync_run("sheet", _request(), _run("run-1"), [])
 
     assert service.metadata_reads == 2
+
+
+def test_sheets_recovers_only_tabs_still_missing_after_a_partial_add_race() -> None:
+    class PartialRaceSheets(_ManagedSheets):
+        def __init__(self) -> None:
+            super().__init__(tabs=["검색 요청"])
+            self.attempts: list[list[str]] = []
+
+        def batchUpdate(self, **kwargs: Any) -> _Response:
+            if "requests" not in kwargs["body"]:
+                return super().batchUpdate(**kwargs)
+            titles = [request["addSheet"]["properties"]["title"] for request in kwargs["body"]["requests"]]
+            self.attempts.append(titles)
+            if len(self.attempts) == 1:
+                self.tabs.append("조사 현황")
+                raise RuntimeError("already exists")
+            self.tabs.extend(titles)
+            return _Response({})
+
+    service = PartialRaceSheets()
+
+    SheetsProjection(service).sync_run("sheet", _request(), _run("run-1"), [])
+
+    assert service.attempts == [["조사 현황", "추천 결과", "관심 매물"], ["추천 결과", "관심 매물"]]
+
+
+def test_sheets_preserves_the_user_request_row_and_finds_keys_after_row_1000() -> None:
+    service = _ManagedSheets()
+    service.status_keys = [["other"] for _ in range(999)] + [["run-late"]]
+    service.candidate_keys = [["other", "candidate"] for _ in range(999)] + [["run-late", "late"]]
+
+    SheetsProjection(service).sync_run("sheet", _request(), _run("run-late"), [{"candidate_id": "late"}])
+
+    written = [entry for update in service.value_updates for entry in update["body"]["data"]]
+    request_entries = [entry for entry in written if entry["range"].startswith("'검색 요청'")]
+    assert len(request_entries) == 1
+    assert request_entries[0]["range"] == "'검색 요청'!A1:J1"
+    assert list(request_entries[0]["values"][0]) == [
+        "request_id", "version", "regions", "budget_minimum", "budget_maximum", "required",
+        "preferred", "excluded", "special_questions", "status",
+    ]
+    assert {"range": "'조사 현황'!A1001:F1001", "values": [["run-late", "req-1", 1, "completed", "report_complete", "now"]]} in written
+    candidate_entry = next(entry for entry in written if entry["range"] == "'추천 결과'!A1001:K1001")
+    assert candidate_entry["values"][0][:2] == ["run-late", "late"]
+    assert len(candidate_entry["values"][0]) == 11
+    assert service.clears == ["'추천 결과'!A1001:K1001"]
 
 
 class _DriveFiles:

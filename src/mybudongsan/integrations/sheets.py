@@ -23,6 +23,8 @@ _CANDIDATE_HEADERS = (
     "total_score", "confidence", "recommendable", "scenario", "evidence_ids",
 )
 _INTEREST_HEADERS = ("candidate_id", "complex_name", "note", "status")
+_STATUS_KEY_RANGE = "'조사 현황'!A2:A"
+_CANDIDATE_KEY_RANGE = "'추천 결과'!A2:B"
 
 
 class SheetsProjection:
@@ -56,18 +58,17 @@ class SheetsProjection:
         try:
             self._ensure_tabs(spreadsheet_id)
             run_id = _required_text(run, "run_id")
-            status_row = _find_key_row(self._read_key_rows(spreadsheet_id, "'조사 현황'!A2:A1000"), run_id)
-            candidate_keys = self._read_key_rows(spreadsheet_id, "'추천 결과'!A2:B1000")
+            status_row = _find_key_row(self._read_key_rows(spreadsheet_id, _STATUS_KEY_RANGE), run_id)
+            candidate_keys = self._read_key_rows(spreadsheet_id, _CANDIDATE_KEY_RANGE)
             candidate_rows = self._candidate_rows(run_id, candidates, candidate_keys)
             self._clear_prior_candidates(spreadsheet_id, candidate_keys, run_id)
-            request_values = [_REQUEST_HEADERS, _request_to_row(request)]
             status_values = [_STATUS_HEADERS]
             status_data = [
                 run_id, request.request_id, request.version, _string(run.get("status")),
                 _string(run.get("stage")), _string(run.get("completed_at")),
             ]
             values = [
-                {"range": "'검색 요청'!A1:J2", "values": request_values},
+                {"range": "'검색 요청'!A1:J1", "values": [_REQUEST_HEADERS]},
                 {"range": "'조사 현황'!A1:F1", "values": status_values},
                 {"range": f"'조사 현황'!A{status_row}:F{status_row}", "values": [status_data]},
                 {"range": "'추천 결과'!A1:K1", "values": [_CANDIDATE_HEADERS]},
@@ -94,18 +95,21 @@ class SheetsProjection:
         if not missing:
             return
         try:
-            self._service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={"requests": [{"addSheet": {"properties": {"title": title}}} for title in missing]},
-            ).execute()
-        except Exception:
+            self._add_tabs(spreadsheet_id, missing)
+        except Exception:  # noqa: BLE001 - recover only a single concurrent AddSheet conflict
             retry = self._service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="sheets.properties(sheetId,title)",
             ).execute()
             still_missing = [title for title in SHEET_TITLES if title not in _tab_titles(retry)]
             if still_missing:
-                raise
+                self._add_tabs(spreadsheet_id, still_missing)
+
+    def _add_tabs(self, spreadsheet_id: str, titles: Sequence[str]) -> None:
+        self._service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": title}}} for title in titles]},
+        ).execute()
 
     def _read_key_rows(self, spreadsheet_id: str, sheet_range: str) -> list[list[str]]:
         response = self._service.spreadsheets().values().get(
@@ -194,16 +198,6 @@ def create_sheets_service(store: GoogleCredentialStore) -> Any:
         raise sanitized_google_error(error) from None
 
 
-def _request_to_row(request: SearchRequest) -> list[object]:
-    return [
-        request.request_id, request.version,
-        json.dumps([item.model_dump(mode="json") for item in request.regions], ensure_ascii=False),
-        str(request.budget.minimum), str(request.budget.maximum),
-        " | ".join(request.required), " | ".join(request.preferred), " | ".join(request.excluded),
-        " | ".join(request.special_questions), request.status.value,
-    ]
-
-
 def _request_from_row(row: Sequence[object]) -> SearchRequest:
     if len(row) != len(_REQUEST_HEADERS):
         raise ValueError("검색 요청 row must contain exactly 10 columns")
@@ -217,7 +211,7 @@ def _request_from_row(row: Sequence[object]) -> SearchRequest:
 
 
 def _candidate_row(candidate: Mapping[str, object]) -> list[str]:
-    return [_string(candidate.get(header)) for header in _CANDIDATE_HEADERS]
+    return [_string(candidate.get(header)) for header in _CANDIDATE_HEADERS[1:]]
 
 
 def _split(value: str) -> list[str]:

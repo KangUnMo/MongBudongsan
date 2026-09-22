@@ -118,7 +118,7 @@ request_id, version, regions, budget_minimum, budget_maximum, required,
 preferred, excluded, special_questions, status
 ```
 
-가져오기는 해당 `검색 요청` 행만 읽어 Pydantic 검증 후 SQLite 요청 버전으로 저장합니다. 결과 동기화는 명시 A1 범위에 안정적인 헤더를 쓰고, `검색 요청`, `조사 현황`, `추천 결과`, `관심 매물` 중 없는 탭만 추가합니다. 결과 탭을 다시 읽어 SQLite를 갱신하지 않습니다.
+가져오기는 해당 `검색 요청` 행만 읽어 Pydantic 검증 후 SQLite 요청 버전으로 저장합니다. 결과 동기화는 명시 A1 범위에 안정적인 헤더를 쓰고, `검색 요청`, `조사 현황`, `추천 결과`, `관심 매물` 중 없는 탭만 추가합니다. 특히 동기화는 `검색 요청`의 사용자 입력 행(2행 이후)을 절대 덮어쓰지 않고 A1:J1 헤더만 관리합니다. 결과 탭을 다시 읽어 SQLite를 갱신하지 않습니다.
 
 ```bash
 uv run mybudongsan sheets import-request --spreadsheet-id SPREADSHEET_ID --row 2
