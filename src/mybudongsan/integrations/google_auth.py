@@ -17,11 +17,17 @@ GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 )
-_SECRET_PATTERN = re.compile(
-    r"(?:client_secret|access_token|refresh_token|id_token|token)"
-    r"(?:\s*[:=]\s*|\"\s*:\s*\")[^,\s\}\]\"]+",
+_SENSITIVE_FIELD = r"client_secret|access_token|refresh_token|id_token"
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?P<prefix>['\"]?(?:{_SENSITIVE_FIELD})['\"]?\s*(?:\?=|[:=]|\s+)\s*)"
+    r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s,}\]&]+)",
     flags=re.IGNORECASE,
 )
+_BEARER_TOKEN = re.compile(r"\b(?:bearer|token)\s+(?P<value>[^\s,}\]&]+)", re.IGNORECASE)
+
+
+class GoogleIntegrationError(RuntimeError):
+    """A Google boundary failure whose message has been stripped of credential values."""
 
 
 class GoogleCredentialStore:
@@ -47,43 +53,53 @@ class GoogleCredentialStore:
         try:
             serialized = self._keyring.get_password(GOOGLE_KEYRING_SERVICE, _KEYRING_USERNAME)
             if not serialized:
-                raise RuntimeError("Google login is required; run `mybudongsan google login` first")
+                raise GoogleIntegrationError(
+                    "Google login is required; run `mybudongsan google login` first"
+                )
             credentials = self._credential_decoder(serialized, GOOGLE_SCOPES)
             if bool(getattr(credentials, "expired", False)):
                 if not getattr(credentials, "refresh_token", None):
-                    raise RuntimeError("Google login is required because the stored session cannot refresh")
+                    raise GoogleIntegrationError(
+                        "Google login is required because the stored session cannot refresh"
+                    )
                 credentials.refresh(self._request_factory())
                 self.save(credentials)
             return credentials
-        except RuntimeError as error:
-            raise RuntimeError(self.redact_error(error)) from None
-        except Exception as error:  # noqa: BLE001 - redact every backend exception before CLI output
-            raise RuntimeError(self.redact_error(error)) from None
+        except Exception as error:  # noqa: BLE001 - a credential boundary must never leak values
+            raise sanitized_google_error(error) from None
 
     def save(self, credentials: Any) -> None:
         try:
             serialized = credentials.to_json()
             self._keyring.set_password(GOOGLE_KEYRING_SERVICE, _KEYRING_USERNAME, serialized)
-        except Exception as error:  # noqa: BLE001 - redact every keychain exception before CLI output
-            raise RuntimeError(self.redact_error(error)) from None
+        except Exception as error:  # noqa: BLE001 - a keychain boundary must never leak values
+            raise sanitized_google_error(error) from None
 
     def login(self) -> None:
         """Run local-browser consent only when the explicit login CLI command invokes it."""
         if self._client_secret_path is None:
-            raise RuntimeError("a local OAuth client-secret path is required for Google login")
+            raise GoogleIntegrationError("a local OAuth client-secret path is required for Google login")
         try:
             flow = self._flow_factory(str(self._client_secret_path), GOOGLE_SCOPES)
             self.save(flow.run_local_server(port=0))
-        except RuntimeError as error:
-            raise RuntimeError(self.redact_error(error)) from None
-        except Exception as error:  # noqa: BLE001 - redact every OAuth exception before CLI output
-            raise RuntimeError(self.redact_error(error)) from None
+        except Exception as error:  # noqa: BLE001 - an OAuth boundary must never leak values
+            raise sanitized_google_error(error) from None
 
     @staticmethod
     def redact_error(error: BaseException | str) -> str:
         """Remove OAuth secrets before an integration error can reach CLI output."""
-        message = str(error)
-        return _SECRET_PATTERN.sub("[credential redacted]", message)
+        return redact_google_text(str(error))
+
+
+def redact_google_text(message: str) -> str:
+    """Scrub JSON, dict, key/value, query-string and bearer credential renderings."""
+    message = _SECRET_ASSIGNMENT.sub(r"\g<prefix>[credential redacted]", message)
+    return _BEARER_TOKEN.sub("Bearer [credential redacted]", message)
+
+
+def sanitized_google_error(error: BaseException | str) -> GoogleIntegrationError:
+    """Build a fresh exception without an original cause, context, or secret-bearing repr."""
+    return GoogleIntegrationError(redact_google_text(str(error)))
 
 
 def _decode_credentials(serialized: str, scopes: tuple[str, ...]) -> Credentials:

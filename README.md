@@ -109,7 +109,7 @@ uv run mybudongsan watch refresh .local/previous.json .local/current.json
 uv run mybudongsan google login --client-secret /안전한/경로/client_secret.json
 ```
 
-권한 범위는 사용자가 선택한 Spreadsheet와 앱이 생성하거나 사용자가 선택한 Drive 파일에 필요한 `spreadsheets`, `drive.file`뿐입니다. client secret, access/refresh/ID token, Keychain의 자격 증명 JSON은 명령 출력이나 로그에 표시하지 않습니다.
+OAuth 범위는 `spreadsheets`와 `drive.file`뿐입니다. 다만 `spreadsheets`는 Google 계정의 Spreadsheet 접근을 승인하는 넓은 범위입니다. MyBudongsan은 사용자가 명령에 직접 제공한 `--spreadsheet-id`만 읽고 쓰지만, 그 동작상 제한은 OAuth 범위 자체를 더 좁히지 않습니다. `drive.file`은 앱이 만들었거나 사용자가 선택한 Drive 파일에 적용됩니다. client secret, access/refresh/ID token, Keychain의 자격 증명 JSON은 명령 출력이나 로그에 표시하지 않습니다.
 
 `검색 요청` 시트의 2행 이후에는 아래 순서의 10개 열을 넣습니다. `regions`는 `[{"name":"서울 강서구","allow_expansion":false}]` 형식의 JSON이고, 목록 열은 ` | `로 구분합니다.
 
@@ -125,7 +125,9 @@ uv run mybudongsan sheets import-request --spreadsheet-id SPREADSHEET_ID --row 2
 uv run mybudongsan sheets sync-run RUN_ID --spreadsheet-id SPREADSHEET_ID
 ```
 
-Drive 업로드는 저장된 `report_complete` 체크포인트가 가리키는 아티팩트만 사용합니다. 선택한 상위 폴더 아래 `YYYY/MM/<request_id>_<run_slug>/` 구조로 `report.md`, `candidates.csv`, `run-data.json`, 그리고 존재하는 근거 파일을 올립니다. 폴더와 파일 이름/부모를 먼저 검색하므로 같은 실행을 다시 올리면 중복 생성 대신 기존 파일을 갱신합니다.
+Drive 업로드는 저장된 `report_complete` 체크포인트가 가리키는 아티팩트만 사용합니다. 선택한 상위 폴더 아래 `YYYY/MM/<request_id>_<run_slug>/` 구조로 `report.md`, `candidates.csv`, `run-data.json`, 그리고 `evidence/` 아래의 일반·비숨김 근거 파일만 올립니다. 세 필수 파일이 하나라도 없거나 심볼릭 링크면 실패하며, 임의의 최상위 파일·`.DS_Store`·숨김 파일·심볼릭 링크는 업로드하지 않습니다. 폴더와 파일 이름/부모/MIME type을 먼저 검색하므로 같은 실행을 다시 올리면 중복 생성 대신 기존 파일을 갱신합니다.
+
+같은 Drive 상위 폴더에 대한 업로드는 로컬 `data_dir`의 해시된 잠금 파일로 직렬화합니다. 이미 업로드가 진행 중이면 API를 호출하기 전에 한국어 오류와 nonzero 종료 코드로 끝나며, 완료·실패 어느 경우에도 잠금은 정리됩니다.
 
 ```bash
 uv run mybudongsan drive upload-run RUN_ID --folder-id DRIVE_FOLDER_ID

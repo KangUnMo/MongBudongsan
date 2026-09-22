@@ -207,7 +207,10 @@ def drive_upload_run(
         report_checkpoint = run.checkpoints.get(RunStage.REPORT_COMPLETE)
         if report_checkpoint is None:
             raise ValueError("보고서가 발행된 실행만 Drive에 업로드할 수 있습니다")
-        DriveBackup(create_drive_service(GoogleCredentialStore())).upload_run(
+        DriveBackup(
+            create_drive_service(GoogleCredentialStore()),
+            lock_directory=_runtime(context).settings.data_dir,
+        ).upload_run(
             folder_id, run.request_id, run.run_id, report_checkpoint.completed_at, artifact_directory
         )
         typer.echo(f"run_id={run_id} folder_id={folder_id}")

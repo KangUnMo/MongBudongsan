@@ -109,7 +109,13 @@ def test_sheets_creates_missing_tabs_once_syncs_explicit_ranges_and_imports_only
     )
 
     assert imported == _request()
-    assert service.get_calls == [{"spreadsheetId": "sheet-1", "range": "'검색 요청'!A2:J2"}]
+    assert service.get_calls[0] == {"spreadsheetId": "sheet-1", "range": "'검색 요청'!A2:J2"}
+    assert [call["range"] for call in service.get_calls[1:]] == [
+        "'조사 현황'!A2:A1000",
+        "'추천 결과'!A2:B1000",
+        "'조사 현황'!A2:A1000",
+        "'추천 결과'!A2:B1000",
+    ]
     assert service.tab_updates[0]["body"]["requests"] == [
         {"addSheet": {"properties": {"title": "조사 현황"}}},
         {"addSheet": {"properties": {"title": "추천 결과"}}},

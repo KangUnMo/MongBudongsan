@@ -80,7 +80,8 @@ def test_missing_credentials_and_errors_redact_all_oauth_secrets(tmp_path: Path)
     unsafe = RuntimeError(
         "client_secret=client access_token=access refresh_token=refresh id_token=identity"
     )
-    assert "client" not in store.redact_error(unsafe)
-    assert "access" not in store.redact_error(unsafe)
-    assert "refresh" not in store.redact_error(unsafe)
-    assert "identity" not in store.redact_error(unsafe)
+    redacted = store.redact_error(unsafe)
+    assert "=client" not in redacted
+    assert "=access" not in redacted
+    assert "=refresh" not in redacted
+    assert "=identity" not in redacted
