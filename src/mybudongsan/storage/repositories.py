@@ -26,6 +26,12 @@ from mybudongsan.domain.scoring import (
     EvaluationResult,
     evaluate_listing,
 )
+from mybudongsan.integrations.google_auth import redact_google_text
+from mybudongsan.notifications.policy import (
+    TERMINAL_EVENT_TYPES,
+    NotificationEvent,
+    NotificationEventType,
+)
 from mybudongsan.research.contracts import EvidenceObservation, ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import (
@@ -33,6 +39,7 @@ from mybudongsan.storage.models import (
     EvidenceModel,
     ListingModel,
     ListingSnapshotModel,
+    NotificationEventModel,
     ReportModel,
     ResearchRunModel,
     SearchRequestModel,
@@ -523,6 +530,164 @@ class ReportRepository:
                 drive_file_id=None,
                 created_at=datetime.now(UTC),
             )
+        )
+
+
+@dataclass(frozen=True)
+class NotificationRecord:
+    event_id: int
+    run_id: str
+    event_type: NotificationEventType
+    channel: str
+    payload: dict[str, object]
+    status: str
+    attempt_count: int
+    last_error: str | None
+    provider_message_id: str | None
+    created_at: datetime
+    sent_at: datetime | None
+
+
+class NotificationRepository:
+    """Persist bounded notification deliveries in the canonical SQLite database."""
+
+    _MAX_EVENT_TYPES = 5
+    _MAX_NONTERMINAL_EVENT_TYPES = 4
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def enqueue(
+        self,
+        run_id: str,
+        event: NotificationEvent,
+    ) -> tuple[NotificationRecord, ...]:
+        channels = ("kakao", "gmail") if event.type in TERMINAL_EVENT_TYPES else ("kakao",)
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            existing = tuple(
+                session.scalars(
+                    select(NotificationEventModel)
+                    .where(
+                        NotificationEventModel.run_id == run_id,
+                        NotificationEventModel.event_type == event.type.value,
+                    )
+                    .order_by(NotificationEventModel.id)
+                )
+            )
+            if existing:
+                return tuple(self._to_record(item) for item in existing)
+
+            event_types = {
+                NotificationEventType(value)
+                for value in session.scalars(
+                    select(NotificationEventModel.event_type).where(
+                        NotificationEventModel.run_id == run_id
+                    )
+                )
+            }
+            terminal_types = event_types & TERMINAL_EVENT_TYPES
+            if event.type in TERMINAL_EVENT_TYPES:
+                if terminal_types:
+                    raise ValueError("a different terminal notification is already stored")
+                if len(event_types) >= self._MAX_EVENT_TYPES:
+                    raise ValueError("notification lifecycle event cap exceeded")
+            else:
+                nonterminal_count = len(event_types - TERMINAL_EVENT_TYPES)
+                if terminal_types or nonterminal_count >= self._MAX_NONTERMINAL_EVENT_TYPES:
+                    raise ValueError("notification terminal event slot must remain reserved")
+
+            created_at = datetime.now(UTC)
+            payload: dict[str, object] = {
+                "run_id": run_id,
+                "event_type": event.type.value,
+                "message": event.message,
+            }
+            models = [
+                NotificationEventModel(
+                    run_id=run_id,
+                    event_type=event.type.value,
+                    channel=channel,
+                    payload=payload,
+                    status="pending",
+                    attempt_count=0,
+                    last_error=None,
+                    provider_message_id=None,
+                    created_at=created_at,
+                    sent_at=None,
+                )
+                for channel in channels
+            ]
+            session.add_all(models)
+            session.flush()
+            return tuple(self._to_record(item) for item in models)
+
+    def pending(self, run_id: str, *, channel: str) -> tuple[NotificationRecord, ...]:
+        if channel not in {"kakao", "gmail"}:
+            raise ValueError("channel must be kakao or gmail")
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            models = session.scalars(
+                select(NotificationEventModel)
+                .where(
+                    NotificationEventModel.run_id == run_id,
+                    NotificationEventModel.channel == channel,
+                    NotificationEventModel.status.in_(("pending", "failed")),
+                )
+                .order_by(NotificationEventModel.id)
+            )
+            return tuple(self._to_record(item) for item in models)
+
+    def mark_sent(self, event_id: int, provider_message_id: str) -> NotificationRecord:
+        provider_message_id = provider_message_id.strip()
+        if not provider_message_id:
+            raise ValueError("provider message ID or provider_acknowledged is required")
+        with self._database.session() as session:
+            model = self._get(session, event_id)
+            if model.status == "sent":
+                return self._to_record(model)
+            model.status = "sent"
+            model.attempt_count += 1
+            model.last_error = None
+            model.provider_message_id = provider_message_id
+            model.sent_at = datetime.now(UTC)
+            session.flush()
+            return self._to_record(model)
+
+    def mark_failed(self, event_id: int, error: str) -> NotificationRecord:
+        with self._database.session() as session:
+            model = self._get(session, event_id)
+            if model.status == "sent":
+                raise ValueError("sent notification cannot be marked failed")
+            model.status = "failed"
+            model.attempt_count += 1
+            model.last_error = redact_google_text(error).strip()[:500]
+            model.provider_message_id = None
+            model.sent_at = None
+            session.flush()
+            return self._to_record(model)
+
+    @staticmethod
+    def _get(session: Session, event_id: int) -> NotificationEventModel:
+        model = session.get(NotificationEventModel, event_id)
+        if model is None:
+            raise ValueError(f"notification event not found: {event_id}")
+        return model
+
+    @staticmethod
+    def _to_record(model: NotificationEventModel) -> NotificationRecord:
+        return NotificationRecord(
+            event_id=model.id,
+            run_id=model.run_id,
+            event_type=NotificationEventType(model.event_type),
+            channel=model.channel,
+            payload=dict(model.payload),
+            status=model.status,
+            attempt_count=model.attempt_count,
+            last_error=model.last_error,
+            provider_message_id=model.provider_message_id,
+            created_at=model.created_at,
+            sent_at=model.sent_at,
         )
 
 

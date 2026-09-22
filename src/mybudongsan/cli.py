@@ -24,6 +24,7 @@ from mybudongsan.domain.scoring import DIMENSIONS, DimensionEvidence
 from mybudongsan.integrations.drive import DriveBackup, create_drive_service
 from mybudongsan.integrations.google_auth import GoogleCredentialStore
 from mybudongsan.integrations.sheets import SheetsProjection, create_sheets_service
+from mybudongsan.notifications.outbox import NotificationOutbox
 from mybudongsan.reports.publication import ReportPublicationService
 from mybudongsan.reports.renderer import (
     AssessedCandidate,
@@ -110,6 +111,7 @@ watch_app = typer.Typer(help="수동 WATCH 비교")
 google_app = typer.Typer(help="명시적으로 실행하는 Google OAuth 로그인")
 sheets_app = typer.Typer(help="Google Sheets 요청/결과 투영")
 drive_app = typer.Typer(help="Google Drive 보고서 백업")
+notify_app = typer.Typer(help="알림 outbox와 PlayMCP 전달 확인 관리")
 app.add_typer(db_app, name="db")
 app.add_typer(request_app, name="request")
 app.add_typer(run_app, name="run")
@@ -117,6 +119,7 @@ app.add_typer(watch_app, name="watch")
 app.add_typer(google_app, name="google")
 app.add_typer(sheets_app, name="sheets")
 app.add_typer(drive_app, name="drive")
+app.add_typer(notify_app, name="notify")
 
 
 @dataclass(frozen=True)
@@ -214,6 +217,72 @@ def drive_upload_run(
             folder_id, run.request_id, run.run_id, report_checkpoint.completed_at, artifact_directory
         )
         typer.echo(f"run_id={run_id} folder_id={folder_id}")
+
+    _run(context, operation)
+
+
+@notify_app.command("pending")
+def notify_pending(
+    context: typer.Context,
+    run_id: str,
+    channel: Annotated[str, typer.Option(help="kakao 또는 gmail 채널")] = "kakao",
+) -> None:
+    """PlayMCP PM skill이 전송할 미확인 payload를 JSON Lines로 출력합니다."""
+
+    def operation() -> None:
+        records = NotificationOutbox(_database(context)).pending(run_id, channel=channel)
+        for record in records:
+            typer.echo(
+                json.dumps(
+                    {
+                        "event_id": record.event_id,
+                        "run_id": record.run_id,
+                        "event_type": record.event_type.value,
+                        "channel": record.channel,
+                        "payload": record.payload,
+                        "status": record.status,
+                        "attempt_count": record.attempt_count,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+
+    _run(context, operation)
+
+
+@notify_app.command("ack")
+def notify_ack(
+    context: typer.Context,
+    event_id: int,
+    provider_id: Annotated[
+        str,
+        typer.Option(
+            "--provider-id",
+            help="공급자 메시지 ID 또는 provider_acknowledged",
+        ),
+    ],
+) -> None:
+    """PlayMCP 또는 Gmail 공급자 확인을 outbox에 기록합니다."""
+
+    def operation() -> None:
+        record = NotificationOutbox(_database(context)).mark_sent(event_id, provider_id)
+        typer.echo(f"event_id={record.event_id} status={record.status}")
+
+    _run(context, operation)
+
+
+@notify_app.command("fail")
+def notify_fail(
+    context: typer.Context,
+    event_id: int,
+    error: Annotated[str, typer.Option("--error", help="비밀값이 없는 안전한 오류 설명")],
+) -> None:
+    """전송 실패와 정제된 오류를 outbox에 기록합니다."""
+
+    def operation() -> None:
+        record = NotificationOutbox(_database(context)).mark_failed(event_id, error)
+        typer.echo(f"event_id={record.event_id} status={record.status}")
 
     _run(context, operation)
 

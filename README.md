@@ -109,7 +109,7 @@ uv run mybudongsan watch refresh .local/previous.json .local/current.json
 uv run mybudongsan google login --client-secret /안전한/경로/client_secret.json
 ```
 
-OAuth 범위는 `spreadsheets`와 `drive.file`뿐입니다. 다만 `spreadsheets`는 Google 계정의 Spreadsheet 접근을 승인하는 넓은 범위입니다. MyBudongsan은 사용자가 명령에 직접 제공한 `--spreadsheet-id`만 읽고 쓰지만, 그 동작상 제한은 OAuth 범위 자체를 더 좁히지 않습니다. `drive.file`은 앱이 만들었거나 사용자가 선택한 Drive 파일에 적용됩니다. client secret, access/refresh/ID token, Keychain의 자격 증명 JSON은 명령 출력이나 로그에 표시하지 않습니다.
+OAuth 범위는 `spreadsheets`, `drive.file`, `gmail.send`입니다. `gmail.send`는 완료·실패 요약 메일만 보내는 데 사용하며 메일을 읽지 않습니다. 기존 Keychain 자격 증명에 이 범위가 없으면 자동으로 권한을 넓히지 않고 `re-consent` 오류로 중단하므로, 위 로그인 명령을 다시 명시적으로 실행해야 합니다. 다만 `spreadsheets`는 Google 계정의 Spreadsheet 접근을 승인하는 넓은 범위입니다. MyBudongsan은 사용자가 명령에 직접 제공한 `--spreadsheet-id`만 읽고 쓰지만, 그 동작상 제한은 OAuth 범위 자체를 더 좁히지 않습니다. `drive.file`은 앱이 만들었거나 사용자가 선택한 Drive 파일에 적용됩니다. client secret, access/refresh/ID token, Keychain의 자격 증명 JSON은 명령 출력이나 로그에 표시하지 않습니다.
 
 `검색 요청` 시트의 2행 이후에는 아래 순서의 10개 열을 넣습니다. `regions`는 `[{"name":"서울 강서구","allow_expansion":false}]` 형식의 JSON이고, 목록 열은 ` | `로 구분합니다.
 
@@ -132,6 +132,20 @@ Drive 업로드는 저장된 `report_complete` 체크포인트가 가리키는 �
 ```bash
 uv run mybudongsan drive upload-run RUN_ID --folder-id DRIVE_FOLDER_ID
 ```
+
+## 제한된 실행 알림 outbox
+
+실행 하나에는 시작, 담당자 배정, 전문 담당자 배정, 마무리, 사용자 확인, 완료 또는 실패 중 최대 5개 lifecycle event type만 저장합니다. 완료와 실패는 Kakao와 Gmail 두 채널 행을 만들지만 같은 lifecycle event 하나로 계산합니다. SQLite의 `(run_id, event_type, channel)` 고유 제약으로 재개 시 같은 알림을 다시 만들지 않습니다.
+
+Python은 Kakao나 PlayMCP 전송을 구현하지 않습니다. 향후 PM skill이 아래 명령으로 미전송 Kakao JSON payload를 읽고 PlayMCP `MemoChat`을 호출한 뒤, 공급자 메시지 ID 또는 공급자가 ID를 주지 않은 경우 정확한 문자열 `provider_acknowledged`로 확인합니다. 실패 설명에는 비밀값을 넣지 마세요.
+
+```bash
+uv run mybudongsan notify pending RUN_ID --channel kakao
+uv run mybudongsan notify ack EVENT_ID --provider-id ID
+uv run mybudongsan notify fail EVENT_ID --error "safe timeout"
+```
+
+완료·실패 Gmail은 동일한 Keychain 자격 증명을 쓰는 `GmailNotifier` adapter가 plain-text UTF-8로 전송합니다. 자동화 테스트는 fake Gmail service만 사용하며 브라우저나 실제 Google API를 열지 않습니다. 발송 뒤 provider message ID를 outbox에 확인해야 재개 시 다시 발송되지 않습니다.
 
 ## 자격 증명과 오류 처리
 

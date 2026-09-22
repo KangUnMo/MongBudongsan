@@ -253,6 +253,37 @@ def test_snapshot_run_ownership_migration_leaves_ambiguous_legacy_rows_unowned(
         AssessmentRepository(Database(database_url)).list_for_run("legacy-run-one")
 
 
+def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alembic_config, database_url = _migration_config(tmp_path, monkeypatch, "notification-outbox")
+    command.upgrade(alembic_config, "0003")
+    engine = create_engine(database_url)
+    legacy_columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("notification_events")
+    }
+    assert legacy_columns["sent_at"]["nullable"] is False
+    assert "status" not in legacy_columns
+    engine.dispose()
+
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(database_url)
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("notification_events")
+    }
+    assert columns["sent_at"]["nullable"] is True
+    assert {
+        "status",
+        "attempt_count",
+        "last_error",
+        "provider_message_id",
+        "created_at",
+    } <= columns.keys()
+    engine.dispose()
+
+
 def _migration_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> tuple[Config, str]:

@@ -16,8 +16,12 @@ _KEYRING_USERNAME = "default"
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/gmail.send",
 )
-_SENSITIVE_FIELD = r"client_secret|access_token|refresh_token|id_token"
+_SENSITIVE_FIELD = (
+    r"client_secret|access_token|refresh_token|id_token|client_token|"
+    r"playmcp_token|api[_-]?key|authorization|password"
+)
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?P<prefix>['\"]?(?:{_SENSITIVE_FIELD})['\"]?\s*(?:\?=|[:=]|\s+)\s*)"
     r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s,}\]&]+)",
@@ -55,6 +59,11 @@ class GoogleCredentialStore:
             if not serialized:
                 raise GoogleIntegrationError(
                     "Google login is required; run `mybudongsan google login` first"
+                )
+            if not set(GOOGLE_SCOPES).issubset(_stored_scopes(serialized)):
+                raise GoogleIntegrationError(
+                    "Google re-consent is required for Gmail send; "
+                    "run `mybudongsan google login` again"
                 )
             credentials = self._credential_decoder(serialized, GOOGLE_SCOPES)
             if bool(getattr(credentials, "expired", False)):
@@ -107,6 +116,18 @@ def _decode_credentials(serialized: str, scopes: tuple[str, ...]) -> Credentials
         Credentials,
         Credentials.from_authorized_user_info(json.loads(serialized), scopes=scopes),  # type: ignore[no-untyped-call]
     )
+
+
+def _stored_scopes(serialized: str) -> set[str]:
+    payload = json.loads(serialized)
+    if not isinstance(payload, dict):
+        return set()
+    scopes = payload.get("scopes", ())
+    if isinstance(scopes, str):
+        return set(scopes.split())
+    if isinstance(scopes, list):
+        return {scope for scope in scopes if isinstance(scope, str)}
+    return set()
 
 
 def _create_flow(client_secret_path: str, scopes: tuple[str, ...]) -> InstalledAppFlow:
