@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import MappingProxyType
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.orm import Session
 
 from mybudongsan.domain.listings import (
@@ -563,7 +564,7 @@ class NotificationRepository:
         event: NotificationEvent,
     ) -> tuple[NotificationRecord, ...]:
         channels = ("kakao", "gmail") if event.type in TERMINAL_EVENT_TYPES else ("kakao",)
-        with self._database.session() as session:
+        with self._write_session() as session:
             ListingRepository._require_run(session, run_id)
             existing = tuple(
                 session.scalars(
@@ -625,29 +626,34 @@ class NotificationRepository:
     def pending(self, run_id: str, *, channel: str) -> tuple[NotificationRecord, ...]:
         if channel not in {"kakao", "gmail"}:
             raise ValueError("channel must be kakao or gmail")
-        with self._database.session() as session:
+        with self._write_session() as session:
             ListingRepository._require_run(session, run_id)
-            models = session.scalars(
-                select(NotificationEventModel)
-                .where(
-                    NotificationEventModel.run_id == run_id,
-                    NotificationEventModel.channel == channel,
-                    NotificationEventModel.status.in_(("pending", "failed")),
+            models = tuple(
+                session.scalars(
+                    select(NotificationEventModel)
+                    .where(
+                        NotificationEventModel.run_id == run_id,
+                        NotificationEventModel.channel == channel,
+                        NotificationEventModel.status.in_(("pending", "failed")),
+                    )
+                    .order_by(NotificationEventModel.id)
                 )
-                .order_by(NotificationEventModel.id)
             )
+            for model in models:
+                model.status = "dispatching"
+                model.attempt_count += 1
+            session.flush()
             return tuple(self._to_record(item) for item in models)
 
     def mark_sent(self, event_id: int, provider_message_id: str) -> NotificationRecord:
         provider_message_id = provider_message_id.strip()
         if not provider_message_id:
             raise ValueError("provider message ID or provider_acknowledged is required")
-        with self._database.session() as session:
+        with self._write_session() as session:
             model = self._get(session, event_id)
-            if model.status == "sent":
-                return self._to_record(model)
+            if model.status != "dispatching":
+                raise ValueError("notification event must be dispatching before acknowledgement")
             model.status = "sent"
-            model.attempt_count += 1
             model.last_error = None
             model.provider_message_id = provider_message_id
             model.sent_at = datetime.now(UTC)
@@ -655,17 +661,24 @@ class NotificationRepository:
             return self._to_record(model)
 
     def mark_failed(self, event_id: int, error: str) -> NotificationRecord:
-        with self._database.session() as session:
+        safe_error = redact_google_text(error).strip()[:500]
+        with self._write_session() as session:
             model = self._get(session, event_id)
-            if model.status == "sent":
-                raise ValueError("sent notification cannot be marked failed")
+            if model.status != "dispatching":
+                raise ValueError("notification event must be dispatching before failure")
             model.status = "failed"
-            model.attempt_count += 1
-            model.last_error = redact_google_text(error).strip()[:500]
+            model.last_error = safe_error
             model.provider_message_id = None
             model.sent_at = None
             session.flush()
             return self._to_record(model)
+
+    @contextmanager
+    def _write_session(self) -> Iterator[Session]:
+        with self._database.session() as session:
+            if self._database.engine.dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
+            yield session
 
     @staticmethod
     def _get(session: Session, event_id: int) -> NotificationEventModel:

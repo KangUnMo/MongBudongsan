@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from email import message_from_bytes
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from sqlalchemy import func, select
@@ -104,6 +106,10 @@ def test_ack_requires_provider_id_and_resume_does_not_redeliver(database: Databa
         NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
     )[0]
 
+    claimed, = outbox.pending("run-notify", channel="kakao")
+    assert claimed.status == "dispatching"
+    assert claimed.attempt_count == 1
+
     with pytest.raises(ValueError, match="provider"):
         outbox.mark_sent(record.event_id, "")
 
@@ -126,6 +132,7 @@ def test_failure_bookkeeping_sanitizes_errors(database: Database) -> None:
         NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
     )[0]
 
+    _claimed, = outbox.pending("run-notify", channel="kakao")
     failed = outbox.mark_failed(
         record.event_id,
         "access_token=secret token kakao-secret api_key=playmcp-secret",
@@ -134,12 +141,161 @@ def test_failure_bookkeeping_sanitizes_errors(database: Database) -> None:
     assert failed.status == "failed"
     assert failed.attempt_count == 1
     assert "secret" not in (failed.last_error or "")
-    assert outbox.pending("run-notify", channel="kakao") == (failed,)
+    retry, = outbox.pending("run-notify", channel="kakao")
+    assert retry.status == "dispatching"
+    assert retry.attempt_count == 2
 
     sent = outbox.mark_sent(record.event_id, "kakao-retry-1")
     assert sent.status == "sent"
     assert sent.attempt_count == 2
     assert outbox.pending("run-notify", channel="kakao") == ()
+
+
+@pytest.mark.parametrize(
+    ("unsafe_message", "secret"),
+    [
+        ("Authorization: Bearer top-secret", "top-secret"),
+        ("Authorization: Basic basic-secret", "basic-secret"),
+        ('{"Authorization": "Bearer json-secret"}', "json-secret"),
+        ("{'Authorization': 'Basic dict-secret'}", "dict-secret"),
+        ("X-API-Key: api-header-secret", "api-header-secret"),
+        ("PlayMCP-API-Key: playmcp-header-secret", "playmcp-header-secret"),
+    ],
+)
+def test_failure_bookkeeping_redacts_entire_auth_header_values(
+    database: Database,
+    unsafe_message: str,
+    secret: str,
+) -> None:
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    record, = outbox.enqueue(
+        "run-notify",
+        NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
+    )
+    outbox.pending("run-notify", channel="kakao")
+
+    failed = outbox.mark_failed(record.event_id, unsafe_message)
+
+    assert secret not in (failed.last_error or "")
+    with database.session() as session:
+        stored = session.get(NotificationEventModel, record.event_id)
+        assert stored is not None
+        assert secret not in (stored.last_error or "")
+
+
+def test_ack_and_fail_require_a_claimed_dispatching_state(database: Database) -> None:
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    record, = outbox.enqueue(
+        "run-notify",
+        NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
+    )
+
+    with pytest.raises(ValueError, match="dispatching"):
+        outbox.mark_sent(record.event_id, "provider-1")
+    with pytest.raises(ValueError, match="dispatching"):
+        outbox.mark_failed(record.event_id, "safe timeout")
+
+    outbox.pending("run-notify", channel="kakao")
+    outbox.mark_sent(record.event_id, "provider-1")
+    with pytest.raises(ValueError, match="dispatching"):
+        outbox.mark_failed(record.event_id, "safe timeout")
+
+
+def test_concurrent_pending_claims_never_return_the_same_event(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'claim-race.sqlite3'}"
+    database = Database(database_url)
+    database.create_schema()
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    for event in plan_events(specialist=False, needs_action=False)[:2]:
+        outbox.enqueue("run-notify", event)
+    barrier = Barrier(2)
+
+    def claim() -> tuple[int, ...]:
+        barrier.wait()
+        claimed = NotificationOutbox(Database(database_url)).pending(
+            "run-notify", channel="kakao"
+        )
+        return tuple(record.event_id for record in claimed)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: claim(), range(2)))
+
+    assert set(results) == {(), tuple(sorted((*results[0], *results[1])))}
+    assert len(set(results[0]) & set(results[1])) == 0
+    assert len((*results[0], *results[1])) == 2
+    with database.session() as session:
+        stored = tuple(
+            session.scalars(
+                select(NotificationEventModel).order_by(NotificationEventModel.id)
+            )
+        )
+    assert all(item.status == "dispatching" and item.attempt_count == 1 for item in stored)
+
+
+def test_concurrent_duplicate_enqueue_returns_one_idempotent_row(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'same-enqueue-race.sqlite3'}"
+    database = Database(database_url)
+    database.create_schema()
+    _seed_run(database)
+    barrier = Barrier(2)
+    event = NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다.")
+
+    def enqueue() -> tuple[int, ...]:
+        barrier.wait()
+        records = NotificationOutbox(Database(database_url)).enqueue("run-notify", event)
+        return tuple(record.event_id for record in records)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: enqueue(), range(2)))
+
+    assert results[0] == results[1]
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(NotificationEventModel)) == 1
+
+
+def test_concurrent_distinct_enqueue_preserves_terminal_slot(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'cap-race.sqlite3'}"
+    database = Database(database_url)
+    database.create_schema()
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    base_events = plan_events(specialist=True, needs_action=False)[:3]
+    for event in base_events:
+        outbox.enqueue("run-notify", event)
+    barrier = Barrier(2)
+    competing = (
+        NotificationEvent(NotificationEventType.FINALIZING, "마무리"),
+        NotificationEvent(NotificationEventType.NEEDS_ACTION, "확인 필요"),
+    )
+
+    def enqueue(event: NotificationEvent) -> str:
+        barrier.wait()
+        try:
+            NotificationOutbox(Database(database_url)).enqueue("run-notify", event)
+        except ValueError:
+            return "rejected"
+        return "stored"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(enqueue, competing))
+
+    assert sorted(outcomes) == ["rejected", "stored"]
+    outbox.enqueue(
+        "run-notify",
+        NotificationEvent(NotificationEventType.COMPLETED, "조사가 완료되었습니다."),
+    )
+    with database.session() as session:
+        event_types = set(
+            session.scalars(
+                select(NotificationEventModel.event_type).where(
+                    NotificationEventModel.run_id == "run-notify"
+                )
+            )
+        )
+    assert len(event_types) == 5
 
 
 class _FakeRequest:
@@ -231,6 +387,32 @@ def test_gmail_rejects_nonterminal_events_and_sanitizes_provider_errors() -> Non
     assert "secret" not in str(error.value)
 
 
+def test_gmail_delivery_uses_claim_ack_protocol_and_is_not_replayed(
+    database: Database,
+) -> None:
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    terminal = NotificationEvent(
+        NotificationEventType.COMPLETED,
+        "조사가 완료되었습니다.",
+    )
+    outbox.enqueue("run-notify", terminal)
+    claimed, = outbox.pending("run-notify", channel="gmail")
+    service = _FakeGmail()
+
+    provider_id = GmailNotifier(service, recipient="owner@example.test").send_terminal(
+        run_id=claimed.run_id,
+        event_type=claimed.event_type,
+        outcome="완료",
+        conclusion="추천 후보를 정리했습니다.",
+    )
+    outbox.mark_sent(claimed.event_id, provider_id)
+    outbox.enqueue("run-notify", terminal)
+
+    assert outbox.pending("run-notify", channel="gmail") == ()
+    assert len(service.send_calls) == 1
+
+
 def test_notify_cli_exposes_pending_kakao_payload_and_records_ack_and_failure(
     tmp_path: Path,
 ) -> None:
@@ -274,3 +456,36 @@ def test_notify_cli_exposes_pending_kakao_payload_and_records_ack_and_failure(
     assert failed.exit_code == 0, failed.output
     assert "status=sent" in acknowledged.output
     assert "status=failed" in failed.output
+
+
+@pytest.mark.parametrize(
+    ("unsafe_message", "secret"),
+    [
+        ("Authorization: Bearer cli-bearer-secret", "cli-bearer-secret"),
+        ("Authorization: Basic cli-basic-secret", "cli-basic-secret"),
+        ("PlayMCP-API-Key: cli-playmcp-secret", "cli-playmcp-secret"),
+    ],
+)
+def test_notify_cli_redacts_runtime_errors_in_normal_and_debug_output(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_message: str,
+    secret: str,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError(unsafe_message)
+
+    monkeypatch.setattr(NotificationOutbox, "mark_failed", fail)
+    arguments = ["notify", "fail", "1", "--error", "safe input"]
+
+    normal = CliRunner().invoke(app, arguments)
+    debug = CliRunner().invoke(app, ["--debug", *arguments])
+
+    assert normal.exit_code != 0
+    assert debug.exit_code != 0
+    assert "Traceback" not in normal.output
+    assert "Traceback" in debug.output
+    assert secret not in normal.output
+    assert secret not in debug.output
+    assert secret not in repr(normal.exception)
+    assert secret not in repr(debug.exception)

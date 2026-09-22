@@ -265,6 +265,33 @@ def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
     }
     assert legacy_columns["sent_at"]["nullable"] is False
     assert "status" not in legacy_columns
+    legacy_sent_at = "2026-09-22 08:00:00.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO search_requests (request_id, version, payload, created_at) "
+                "VALUES ('notify-request', 1, '{}', :sent_at)"
+            ),
+            {"sent_at": legacy_sent_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO research_runs "
+                "(run_id, request_id, request_version, status, current_stage, "
+                "checkpoint_payload, error_message, started_at, completed_at) "
+                "VALUES ('notify-run', 'notify-request', 1, 'completed', 'sync_complete', "
+                "'{}', NULL, :sent_at, :sent_at)"
+            ),
+            {"sent_at": legacy_sent_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO notification_events "
+                "(run_id, event_type, channel, payload, sent_at) "
+                "VALUES ('notify-run', 'completed', 'kakao', '{}', :sent_at)"
+            ),
+            {"sent_at": legacy_sent_at},
+        )
     engine.dispose()
 
     command.upgrade(alembic_config, "head")
@@ -281,6 +308,17 @@ def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
         "provider_message_id",
         "created_at",
     } <= columns.keys()
+    with engine.connect() as connection:
+        legacy = connection.execute(
+            text(
+                "SELECT status, attempt_count, created_at, sent_at, provider_message_id "
+                "FROM notification_events WHERE run_id = 'notify-run'"
+            )
+        ).mappings().one()
+    assert legacy["status"] == "sent"
+    assert legacy["attempt_count"] == 1
+    assert legacy["created_at"] == legacy["sent_at"]
+    assert legacy["provider_message_id"] == "provider_acknowledged"
     engine.dispose()
 
 

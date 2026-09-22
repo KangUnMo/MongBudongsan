@@ -19,6 +19,7 @@ class NotificationOutbox:
         return self._repository.enqueue(run_id, event)
 
     def pending(self, run_id: str, *, channel: str) -> tuple[NotificationRecord, ...]:
+        """Atomically claim retryable rows by moving them to dispatching."""
         return self._repository.pending(run_id, channel=channel)
 
     def mark_sent(self, event_id: int, provider_message_id: str) -> NotificationRecord:

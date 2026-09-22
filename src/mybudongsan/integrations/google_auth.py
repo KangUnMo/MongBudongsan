@@ -22,12 +22,24 @@ _SENSITIVE_FIELD = (
     r"client_secret|access_token|refresh_token|id_token|client_token|"
     r"playmcp_token|api[_-]?key|authorization|password"
 )
+_SENSITIVE_HEADER_FIELD = r"authorization|(?:(?:playmcp|x)[_-])?api[_-]?key"
+_QUOTED_HEADER = re.compile(
+    rf"(?P<prefix>['\"]?(?:{_SENSITIVE_HEADER_FIELD})['\"]?\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>[^'\"]*)(?P=quote)",
+    flags=re.IGNORECASE,
+)
+_UNQUOTED_HEADER = re.compile(
+    rf"(?P<prefix>\b(?:{_SENSITIVE_HEADER_FIELD})\b\s*[:=]\s*)"
+    r"(?P<value>[^'\"\r\n,}\]&]+)",
+    flags=re.IGNORECASE,
+)
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?P<prefix>['\"]?(?:{_SENSITIVE_FIELD})['\"]?\s*(?:\?=|[:=]|\s+)\s*)"
     r"(?P<value>'[^']*'|\"[^\"]*\"|[^\s,}\]&]+)",
     flags=re.IGNORECASE,
 )
 _BEARER_TOKEN = re.compile(r"\b(?:bearer|token)\s+(?P<value>[^\s,}\]&]+)", re.IGNORECASE)
+_BASIC_TOKEN = re.compile(r"\bbasic\s+(?P<value>[^\s,}\]&]+)", re.IGNORECASE)
 
 
 class GoogleIntegrationError(RuntimeError):
@@ -102,8 +114,14 @@ class GoogleCredentialStore:
 
 def redact_google_text(message: str) -> str:
     """Scrub JSON, dict, key/value, query-string and bearer credential renderings."""
+    message = _QUOTED_HEADER.sub(
+        r"\g<prefix>\g<quote>[credential redacted]\g<quote>",
+        message,
+    )
+    message = _UNQUOTED_HEADER.sub(r"\g<prefix>[credential redacted]", message)
     message = _SECRET_ASSIGNMENT.sub(r"\g<prefix>[credential redacted]", message)
-    return _BEARER_TOKEN.sub("Bearer [credential redacted]", message)
+    message = _BEARER_TOKEN.sub("Bearer [credential redacted]", message)
+    return _BASIC_TOKEN.sub("Basic [credential redacted]", message)
 
 
 def sanitized_google_error(error: BaseException | str) -> GoogleIntegrationError:

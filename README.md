@@ -137,7 +137,7 @@ uv run mybudongsan drive upload-run RUN_ID --folder-id DRIVE_FOLDER_ID
 
 실행 하나에는 시작, 담당자 배정, 전문 담당자 배정, 마무리, 사용자 확인, 완료 또는 실패 중 최대 5개 lifecycle event type만 저장합니다. 완료와 실패는 Kakao와 Gmail 두 채널 행을 만들지만 같은 lifecycle event 하나로 계산합니다. SQLite의 `(run_id, event_type, channel)` 고유 제약으로 재개 시 같은 알림을 다시 만들지 않습니다.
 
-Python은 Kakao나 PlayMCP 전송을 구현하지 않습니다. 향후 PM skill이 아래 명령으로 미전송 Kakao JSON payload를 읽고 PlayMCP `MemoChat`을 호출한 뒤, 공급자 메시지 ID 또는 공급자가 ID를 주지 않은 경우 정확한 문자열 `provider_acknowledged`로 확인합니다. 실패 설명에는 비밀값을 넣지 마세요.
+Python은 Kakao나 PlayMCP 전송을 구현하지 않습니다. 향후 PM skill이 아래 `pending` 명령으로 재시도 가능한 Kakao 행을 원자적으로 claim합니다. 출력된 행은 SQLite에서 `dispatching`으로 바뀌며 attempt count가 증가하므로, 다른 동시 명령이나 재개 실행에는 다시 나오지 않습니다. PM skill은 PlayMCP `MemoChat`을 호출한 뒤, 공급자 메시지 ID 또는 공급자가 ID를 주지 않은 경우 정확한 문자열 `provider_acknowledged`로 확인합니다. 실패 설명에는 비밀값을 넣지 마세요.
 
 ```bash
 uv run mybudongsan notify pending RUN_ID --channel kakao
@@ -145,7 +145,9 @@ uv run mybudongsan notify ack EVENT_ID --provider-id ID
 uv run mybudongsan notify fail EVENT_ID --error "safe timeout"
 ```
 
-완료·실패 Gmail은 동일한 Keychain 자격 증명을 쓰는 `GmailNotifier` adapter가 plain-text UTF-8로 전송합니다. 자동화 테스트는 fake Gmail service만 사용하며 브라우저나 실제 Google API를 열지 않습니다. 발송 뒤 provider message ID를 outbox에 확인해야 재개 시 다시 발송되지 않습니다.
+`pending`이 JSON을 출력한 뒤 프로세스가 종료되면 자동으로 다시 전송하지 않습니다. 외부 공급자 전송 여부를 먼저 확인하세요. 전송되지 않았음이 확인된 경우에만 출력에 있던 `EVENT_ID`로 `notify fail EVENT_ID --error "safe recovery"`를 실행해 해당 채널 행을 재시도 가능 상태로 돌린 다음 `pending`을 다시 호출합니다. 공급자가 받았는지 불명확할 때 자동 재시도하면 중복 메시지가 생길 수 있으므로 재시도하지 말고 수동으로 확인합니다. 이 수동 복구 계약은 외부 공급자와 SQLite 사이의 exactly-once 전달을 보장한다고 가장하지 않습니다.
+
+완료·실패 Gmail도 먼저 `notify pending RUN_ID --channel gmail`로 같은 outbox claim을 얻은 뒤, 동일한 Keychain 자격 증명을 쓰는 `GmailNotifier` adapter로 plain-text UTF-8 메일을 전송하고 provider message ID로 `notify ack` 해야 합니다. Gmail 실패나 전송 전 crash도 위와 같은 명시적 `notify fail` 절차만 사용합니다. 자동화 테스트는 fake Gmail service만 사용하며 브라우저나 실제 Google API를 열지 않습니다.
 
 ## 자격 증명과 오류 처리
 

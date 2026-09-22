@@ -22,7 +22,7 @@ from mybudongsan.domain.requests import SearchRequest
 from mybudongsan.domain.runs import RunStage
 from mybudongsan.domain.scoring import DIMENSIONS, DimensionEvidence
 from mybudongsan.integrations.drive import DriveBackup, create_drive_service
-from mybudongsan.integrations.google_auth import GoogleCredentialStore
+from mybudongsan.integrations.google_auth import GoogleCredentialStore, redact_google_text
 from mybudongsan.integrations.sheets import SheetsProjection, create_sheets_service
 from mybudongsan.notifications.outbox import NotificationOutbox
 from mybudongsan.reports.publication import ReportPublicationService
@@ -111,7 +111,7 @@ watch_app = typer.Typer(help="수동 WATCH 비교")
 google_app = typer.Typer(help="명시적으로 실행하는 Google OAuth 로그인")
 sheets_app = typer.Typer(help="Google Sheets 요청/결과 투영")
 drive_app = typer.Typer(help="Google Drive 보고서 백업")
-notify_app = typer.Typer(help="알림 outbox와 PlayMCP 전달 확인 관리")
+notify_app = typer.Typer(help="알림 outbox claim과 PlayMCP 전달 확인 관리")
 app.add_typer(db_app, name="db")
 app.add_typer(request_app, name="request")
 app.add_typer(run_app, name="run")
@@ -227,7 +227,7 @@ def notify_pending(
     run_id: str,
     channel: Annotated[str, typer.Option(help="kakao 또는 gmail 채널")] = "kakao",
 ) -> None:
-    """PlayMCP PM skill이 전송할 미확인 payload를 JSON Lines로 출력합니다."""
+    """재시도 가능한 payload를 원자적으로 claim하고 JSON Lines로 출력합니다."""
 
     def operation() -> None:
         records = NotificationOutbox(_database(context)).pending(run_id, channel=channel)
@@ -263,7 +263,7 @@ def notify_ack(
         ),
     ],
 ) -> None:
-    """PlayMCP 또는 Gmail 공급자 확인을 outbox에 기록합니다."""
+    """Claim된 PlayMCP 또는 Gmail 전달의 공급자 확인을 기록합니다."""
 
     def operation() -> None:
         record = NotificationOutbox(_database(context)).mark_sent(event_id, provider_id)
@@ -278,7 +278,7 @@ def notify_fail(
     event_id: int,
     error: Annotated[str, typer.Option("--error", help="비밀값이 없는 안전한 오류 설명")],
 ) -> None:
-    """전송 실패와 정제된 오류를 outbox에 기록합니다."""
+    """Claim된 전달을 정제된 오류와 함께 수동 재시도 가능 상태로 돌립니다."""
 
     def operation() -> None:
         record = NotificationOutbox(_database(context)).mark_failed(event_id, error)
@@ -521,8 +521,12 @@ def _run(context: typer.Context, operation: Callable[[], None]) -> None:
         operation()
     except typer.Exit:
         raise
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - the CLI boundary sanitizes every failure
+        safe_message = redact_google_text(str(error))
         if _runtime(context).debug:
-            traceback.print_exc()
-        typer.echo(f"오류: 명령을 완료하지 못했습니다. {error}", err=True)
-        raise typer.Exit(code=1) from error
+            typer.echo("Traceback (most recent call last):", err=True)
+            for frame in traceback.format_tb(error.__traceback__):
+                typer.echo(frame.rstrip(), err=True)
+            typer.echo(f"{type(error).__name__}: {safe_message}", err=True)
+        typer.echo(f"오류: 명령을 완료하지 못했습니다. {safe_message}", err=True)
+        raise typer.Exit(code=1) from None
