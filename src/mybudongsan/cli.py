@@ -1,32 +1,110 @@
 from __future__ import annotations
 
+import json
 import re
+import sys
 import traceback
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import typer
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import make_url
+from typer import _click
+from typer.core import TyperGroup
 
 from mybudongsan.config import Settings
 from mybudongsan.domain.requests import SearchRequest
 from mybudongsan.domain.runs import RunStage
-from mybudongsan.reports.renderer import ReportBundle, ReportRenderer, ReportRunSummary
-from mybudongsan.research.contracts import ListingObservation, ResearchBundle
+from mybudongsan.domain.scoring import DIMENSIONS, DimensionEvidence
+from mybudongsan.reports.renderer import (
+    AssessedCandidate,
+    ReportBundle,
+    ReportRenderer,
+    ReportRunSummary,
+)
+from mybudongsan.reports.renderer import (
+    EvidenceRecord as ReportEvidenceRecord,
+)
+from mybudongsan.research.contracts import (
+    DeepAssessmentObservation,
+    ListingObservation,
+    ResearchBundle,
+)
 from mybudongsan.research.ingest import ListingIngestService
 from mybudongsan.storage.database import Database
-from mybudongsan.storage.models import ReportModel
-from mybudongsan.storage.repositories import ListingRepository, RequestRepository, RunRepository
+from mybudongsan.storage.repositories import (
+    AssessmentRepository,
+    EvidenceRepository,
+    ListingRepository,
+    ReportRepository,
+    RequestRepository,
+    RunRepository,
+)
 from mybudongsan.workflows.research_run import ResearchRunService
 from mybudongsan.workflows.watch import WatchChangeDetector
 
-app = typer.Typer(help="개인용 부동산 조사 로컬 CLI")
+
+class KoreanTyperGroup(TyperGroup):
+    """Render Click/Typer parse failures with the same Korean error contract."""
+
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: Any,
+    ) -> Any:
+        parsed_args = list(sys.argv[1:] if args is None else args)
+        try:
+            result = super().main(
+                args=args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=False,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        except _click.ClickException as error:
+            if _root_debug_requested(parsed_args):
+                traceback.print_exc()
+            typer.echo(f"오류: 입력을 확인해 주세요. {error.format_message()}", err=True)
+            if standalone_mode:
+                raise SystemExit(error.exit_code) from error
+            raise
+        if standalone_mode and isinstance(result, int) and result != 0:
+            raise SystemExit(result)
+        return result
+
+
+def _root_debug_requested(args: Sequence[str]) -> bool:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--debug":
+            return True
+        if token in {"--db-url", "--data-dir"}:
+            index += 2
+            continue
+        if token.startswith(("--db-url=", "--data-dir=")) or token in {
+            "--no-debug",
+            "--install-completion",
+            "--show-completion",
+            "--help",
+        }:
+            index += 1
+            continue
+        return False
+    return False
+
+
+app = typer.Typer(cls=KoreanTyperGroup, help="개인용 부동산 조사 로컬 CLI")
 db_app = typer.Typer(help="SQLite 데이터베이스 관리")
 request_app = typer.Typer(help="검색 요청 관리")
 run_app = typer.Typer(help="조사 실행 관리")
@@ -96,7 +174,23 @@ def run_ingest(context: typer.Context, run_id: str, bundle_path: Path) -> None:
         bundle = ResearchBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
         database = _database(context)
         run_service = _run_service(database)
-        summary = ListingIngestService(ListingRepository(database)).ingest(run_id, bundle)
+        persisted_bundle = _persist_evidence(database, run_id, bundle)
+        summary = ListingIngestService(ListingRepository(database)).ingest(
+            run_id, persisted_bundle
+        )
+        deep_count = len(persisted_bundle.deep_assessments)
+        deep_results = summary.results[-deep_count:] if deep_count else ()
+        assessment_repository = AssessmentRepository(database)
+        for deep_assessment, listing_result in zip(
+            persisted_bundle.deep_assessments,
+            deep_results,
+            strict=True,
+        ):
+            assessment_repository.save(
+                run_id=run_id,
+                listing_id=listing_result.listing_id,
+                evaluation_input=deep_assessment.evaluation_input,
+            )
         run_service.advance(
             run_id,
             RunStage.DISCOVERY_COMPLETE,
@@ -150,32 +244,63 @@ def run_report(
             raise ValueError("보고서는 심층 조사가 완료된 실행에서만 만들 수 있습니다")
         request = request_repository.get_version(run.request_id, run.request_version)
         output_root = (output or _runtime(context).settings.data_dir / "artifacts").resolve()
+        assessed_records = AssessmentRepository(database).list_for_run(run_id, limit=3)
+        candidates = tuple(
+            AssessedCandidate(
+                candidate_id=_candidate_id(record.listing, record.listing_id),
+                listing=record.listing,
+                assessment=record.assessment.evaluation_result,
+                evidence_ids=_evaluation_evidence_ids(
+                    record.assessment.evaluation_input.evidence_ids_by_dimension
+                ),
+            )
+            for record in assessed_records
+        )
+        candidate_evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id
+                for candidate in candidates
+                for evidence_id in candidate.evidence_ids
+            )
+        )
+        evidence = tuple(
+            ReportEvidenceRecord(
+                evidence_id=item.evidence_id,
+                claim=item.claim,
+                source_url=item.source_url,
+                source_type=item.source_type,
+                excerpt=item.excerpt,
+                accessed_at=item.accessed_at,
+            )
+            for item in EvidenceRepository(database).list_for_run(
+                run_id,
+                evidence_ids=candidate_evidence_ids,
+            )
+        )
+        if run.current_stage is None or run.completed_at is None:
+            raise RuntimeError("보고서 실행 메타데이터가 완전하지 않습니다")
         bundle = ReportBundle(
             request=request,
             run=ReportRunSummary(
                 run_id=run.run_id,
                 status=run.status.value,
-                stage=RunStage.REPORT_COMPLETE.value,
-                completed_at=run.completed_at or datetime.now(UTC),
+                stage=run.current_stage.value,
+                completed_at=run.completed_at,
                 slug=_slug(run.run_id),
             ),
+            candidates=candidates,
+            evidence=evidence,
         )
         artifacts = ReportRenderer().render(bundle, output_root)
+        ReportRepository(database).save_markdown(
+            run_id,
+            artifacts.report_path.read_text(encoding="utf-8"),
+        )
         run_service.advance(
             run_id,
             RunStage.REPORT_COMPLETE,
             {"report_path": str(artifacts.report_path)},
         )
-        with database.session() as session:
-            session.add(
-                ReportModel(
-                    run_id=run_id,
-                    format="markdown",
-                    content=artifacts.report_path.read_text(encoding="utf-8"),
-                    drive_file_id=None,
-                    created_at=datetime.now(UTC),
-                )
-            )
         typer.echo(f"report_path={artifacts.report_path.resolve()}")
 
     _run(context, operation)
@@ -222,9 +347,80 @@ def _upgrade_database(settings: Settings) -> None:
 
 
 def _read_observation(path: Path) -> ListingObservation | None:
-    if not path.exists():
+    if not path.is_file():
+        raise FileNotFoundError(f"관측 파일을 찾을 수 없습니다: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload is None:
         return None
-    return ListingObservation.model_validate_json(path.read_text(encoding="utf-8"))
+    return ListingObservation.model_validate(payload)
+
+
+def _persist_evidence(
+    database: Database,
+    run_id: str,
+    bundle: ResearchBundle,
+) -> ResearchBundle:
+    evidence = tuple(
+        item
+        for assessment in bundle.deep_assessments
+        for item in assessment.evidence
+    )
+    persisted = EvidenceRepository(database).save_for_run(run_id, evidence)
+    evidence_id_map = {
+        item.local_evidence_id: item.evidence_id for item in persisted
+    }
+    deep_assessments = tuple(
+        _remap_deep_assessment(assessment, evidence_id_map)
+        for assessment in bundle.deep_assessments
+    )
+    return bundle.model_copy(update={"deep_assessments": deep_assessments})
+
+
+def _remap_deep_assessment(
+    assessment: DeepAssessmentObservation,
+    evidence_id_map: dict[int, int],
+) -> DeepAssessmentObservation:
+    remapped_dimensions = DimensionEvidence(
+        **{
+            dimension: tuple(
+                evidence_id_map[evidence_id]
+                for evidence_id in getattr(
+                    assessment.evaluation_input.evidence_ids_by_dimension,
+                    dimension,
+                )
+            )
+            for dimension in DIMENSIONS
+        }
+    )
+    evaluation_input = assessment.evaluation_input.model_copy(
+        update={"evidence_ids_by_dimension": remapped_dimensions}
+    )
+    listing = assessment.listing.model_copy(
+        update={
+            "raw_evidence_ids": tuple(
+                evidence_id_map[evidence_id]
+                for evidence_id in assessment.listing.raw_evidence_ids
+            )
+        }
+    )
+    return assessment.model_copy(
+        update={"listing": listing, "evaluation_input": evaluation_input}
+    )
+
+
+def _evaluation_evidence_ids(evidence: DimensionEvidence) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(
+            evidence_id
+            for dimension in DIMENSIONS
+            for evidence_id in getattr(evidence, dimension)
+        )
+    )
+
+
+def _candidate_id(listing: ListingObservation, listing_id: int) -> str:
+    source_listing_id = listing.source_listing_id or f"listing-{listing_id}"
+    return f"{listing.source}:{source_listing_id}"
 
 
 def _slug(value: str) -> str:

@@ -26,8 +26,35 @@
     {"source": "fixture", "source_listing_id": "verified-07", "complex_name": "검증 단지 07", "address": "서울 테스트구 27", "asking_price": 806000000, "status": "active", "observed_at": "2026-09-21T10:00:00Z"}
   ],
   "deep_assessments": [
-    {"source": "fixture", "source_listing_id": "deep-01", "complex_name": "심층 단지 01", "address": "서울 테스트구 31", "asking_price": 900000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"},
-    {"source": "fixture", "source_listing_id": "deep-02", "complex_name": "심층 단지 02", "address": "서울 테스트구 32", "asking_price": 901000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"},
-    {"source": "fixture", "source_listing_id": "deep-03", "complex_name": "심층 단지 03", "address": "서울 테스트구 33", "asking_price": 902000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z"}
+    {
+      "listing": {"source": "fixture", "source_listing_id": "deep-01", "complex_name": "심층 단지 01", "address": "서울 테스트구 31", "asking_price": 900000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z", "raw_evidence_ids": [101, 102, 103, 104]},
+      "evidence": [
+        {"evidence_id": 101, "claim": "심층 단지 01 유동성 근거", "source_url": "fixture://research/deep-01/liquidity", "source_type": "fixture", "excerpt": "유동성 82점", "accessed_at": "2026-09-21T10:00:00Z"},
+        {"evidence_id": 102, "claim": "심층 단지 01 통근 근거", "source_url": "fixture://research/deep-01/commute", "source_type": "fixture", "excerpt": "통근 78점", "accessed_at": "2026-09-21T10:01:00Z"},
+        {"evidence_id": 103, "claim": "심층 단지 01 가격 근거", "source_url": "fixture://research/deep-01/price", "source_type": "fixture", "excerpt": "가격 75점", "accessed_at": "2026-09-21T10:02:00Z"},
+        {"evidence_id": 104, "claim": "심층 단지 01 주거 근거", "source_url": "fixture://research/deep-01/residential", "source_type": "fixture", "excerpt": "주거 88점", "accessed_at": "2026-09-21T10:03:00Z"}
+      ],
+      "evaluation_input": {"required_passed": true, "excluded_passed": true, "active_listing_confirmed": true, "minimum_evidence_met": true, "liquidity": 82, "commute": 78, "price": 75, "residential": 88, "confidence": 91, "evidence_ids_by_dimension": {"liquidity": [101], "commute": [102], "price": [103], "residential": [104]}}
+    },
+    {
+      "listing": {"source": "fixture", "source_listing_id": "deep-02", "complex_name": "심층 단지 02", "address": "서울 테스트구 32", "asking_price": 901000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z", "raw_evidence_ids": [105, 106, 107, 108]},
+      "evidence": [
+        {"evidence_id": 105, "claim": "심층 단지 02 유동성 근거", "source_url": "fixture://research/deep-02/liquidity", "source_type": "fixture", "excerpt": "유동성 76점", "accessed_at": "2026-09-21T10:04:00Z"},
+        {"evidence_id": 106, "claim": "심층 단지 02 통근 근거", "source_url": "fixture://research/deep-02/commute", "source_type": "fixture", "excerpt": "통근 84점", "accessed_at": "2026-09-21T10:05:00Z"},
+        {"evidence_id": 107, "claim": "심층 단지 02 가격 근거", "source_url": "fixture://research/deep-02/price", "source_type": "fixture", "excerpt": "가격 72점", "accessed_at": "2026-09-21T10:06:00Z"},
+        {"evidence_id": 108, "claim": "심층 단지 02 주거 근거", "source_url": "fixture://research/deep-02/residential", "source_type": "fixture", "excerpt": "주거 86점", "accessed_at": "2026-09-21T10:07:00Z"}
+      ],
+      "evaluation_input": {"required_passed": true, "excluded_passed": true, "active_listing_confirmed": true, "minimum_evidence_met": true, "liquidity": 76, "commute": 84, "price": 72, "residential": 86, "confidence": 89, "evidence_ids_by_dimension": {"liquidity": [105], "commute": [106], "price": [107], "residential": [108]}}
+    },
+    {
+      "listing": {"source": "fixture", "source_listing_id": "deep-03", "complex_name": "심층 단지 03", "address": "서울 테스트구 33", "asking_price": 902000000, "status": "active", "observed_at": "2026-09-21T11:00:00Z", "raw_evidence_ids": [109, 110, 111, 112]},
+      "evidence": [
+        {"evidence_id": 109, "claim": "심층 단지 03 유동성 근거", "source_url": "fixture://research/deep-03/liquidity", "source_type": "fixture", "excerpt": "유동성 71점", "accessed_at": "2026-09-21T10:08:00Z"},
+        {"evidence_id": 110, "claim": "심층 단지 03 통근 근거", "source_url": "fixture://research/deep-03/commute", "source_type": "fixture", "excerpt": "통근 73점", "accessed_at": "2026-09-21T10:09:00Z"},
+        {"evidence_id": 111, "claim": "심층 단지 03 가격 근거", "source_url": "fixture://research/deep-03/price", "source_type": "fixture", "excerpt": "가격 80점", "accessed_at": "2026-09-21T10:10:00Z"},
+        {"evidence_id": 112, "claim": "심층 단지 03 주거 근거", "source_url": "fixture://research/deep-03/residential", "source_type": "fixture", "excerpt": "주거 77점", "accessed_at": "2026-09-21T10:11:00Z"}
+      ],
+      "evaluation_input": {"required_passed": true, "excluded_passed": true, "active_listing_confirmed": true, "minimum_evidence_met": true, "liquidity": 71, "commute": 73, "price": 80, "residential": 77, "confidence": 87, "evidence_ids_by_dimension": {"liquidity": [109], "commute": [110], "price": [111], "residential": [112]}}
+    }
   ]
 }

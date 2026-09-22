@@ -26,13 +26,14 @@ from mybudongsan.domain.scoring import (
     EvaluationResult,
     evaluate_listing,
 )
-from mybudongsan.research.contracts import ListingObservation
+from mybudongsan.research.contracts import EvidenceObservation, ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import (
     AssessmentModel,
     EvidenceModel,
     ListingModel,
     ListingSnapshotModel,
+    ReportModel,
     ResearchRunModel,
     SearchRequestModel,
 )
@@ -221,12 +222,94 @@ class ListingRepository:
 
 
 @dataclass(frozen=True)
+class PersistedEvidence:
+    local_evidence_id: int
+    evidence_id: int
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    evidence_id: int
+    claim: str
+    source_url: str
+    source_type: str
+    excerpt: str | None
+    accessed_at: datetime
+
+
+class EvidenceRepository:
+    """Persist and project evidence while preserving run ownership."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def save_for_run(
+        self,
+        run_id: str,
+        evidence: tuple[EvidenceObservation, ...],
+    ) -> tuple[PersistedEvidence, ...]:
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            stored: list[PersistedEvidence] = []
+            for item in evidence:
+                model = EvidenceModel(
+                    run_id=run_id,
+                    listing_id=None,
+                    claim=item.claim,
+                    source_url=item.source_url,
+                    source_type=item.source_type,
+                    excerpt=item.excerpt,
+                    accessed_at=item.accessed_at,
+                )
+                session.add(model)
+                session.flush()
+                stored.append(
+                    PersistedEvidence(
+                        local_evidence_id=item.evidence_id,
+                        evidence_id=model.id,
+                    )
+                )
+            return tuple(stored)
+
+    def list_for_run(
+        self,
+        run_id: str,
+        *,
+        evidence_ids: tuple[int, ...] | None = None,
+    ) -> tuple[EvidenceRecord, ...]:
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            statement = select(EvidenceModel).where(EvidenceModel.run_id == run_id)
+            if evidence_ids is not None:
+                statement = statement.where(EvidenceModel.id.in_(evidence_ids))
+            evidence = session.scalars(statement.order_by(EvidenceModel.id))
+            return tuple(
+                EvidenceRecord(
+                    evidence_id=item.id,
+                    claim=item.claim,
+                    source_url=item.source_url,
+                    source_type=item.source_type,
+                    excerpt=item.excerpt,
+                    accessed_at=item.accessed_at,
+                )
+                for item in evidence
+            )
+
+
+@dataclass(frozen=True)
 class AssessmentRecord:
     run_id: str
     listing_id: int
     evaluation_input: EvaluationInput
     evaluation_result: EvaluationResult
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class AssessedListingRecord:
+    listing_id: int
+    listing: ListingObservation
+    assessment: AssessmentRecord
 
 
 class AssessmentRepository:
@@ -274,6 +357,48 @@ class AssessmentRepository:
             if assessment is None:
                 raise ValueError(f"assessment not found: {run_id}/{listing_id}")
             return self._to_record(assessment)
+
+    def list_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int = 3,
+    ) -> tuple[AssessedListingRecord, ...]:
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            assessments = tuple(
+                session.scalars(
+                    select(AssessmentModel)
+                    .where(AssessmentModel.run_id == run_id)
+                    .order_by(AssessmentModel.id)
+                    .limit(limit)
+                )
+            )
+            projected: list[AssessedListingRecord] = []
+            for assessment in assessments:
+                snapshot = session.scalar(
+                    select(ListingSnapshotModel)
+                    .where(
+                        ListingSnapshotModel.listing_id == assessment.listing_id,
+                        ListingSnapshotModel.observed_at <= assessment.created_at,
+                    )
+                    .order_by(
+                        desc(ListingSnapshotModel.observed_at),
+                        desc(ListingSnapshotModel.id),
+                    )
+                )
+                if snapshot is None:
+                    raise ValueError(
+                        f"listing snapshot not found: {assessment.listing_id}"
+                    )
+                projected.append(
+                    AssessedListingRecord(
+                        listing_id=assessment.listing_id,
+                        listing=ListingObservation.model_validate(snapshot.payload),
+                        assessment=self._to_record(assessment),
+                    )
+                )
+            return tuple(projected)
 
     @staticmethod
     def _require_listing(session: Session, listing_id: int) -> None:
@@ -327,6 +452,26 @@ class AssessmentRepository:
             evaluation_result=EvaluationResult.model_validate(assessment.result_payload),
             created_at=assessment.created_at,
         )
+
+
+class ReportRepository:
+    """Persist rendered report content after artifact publication succeeds."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def save_markdown(self, run_id: str, content: str) -> None:
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            session.add(
+                ReportModel(
+                    run_id=run_id,
+                    format="markdown",
+                    content=content,
+                    drive_file_id=None,
+                    created_at=datetime.now(UTC),
+                )
+            )
 
 
 @dataclass(frozen=True)

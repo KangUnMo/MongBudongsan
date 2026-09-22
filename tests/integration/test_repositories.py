@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
 from mybudongsan.domain.scoring import EvaluationInput, EvaluationResult, evaluate_listing
+from mybudongsan.research.contracts import EvidenceObservation, ListingObservation
 from mybudongsan.storage.models import (
     AssessmentModel,
     EvidenceModel,
@@ -16,7 +17,13 @@ from mybudongsan.storage.models import (
     ListingSnapshotModel,
     ResearchRunModel,
 )
-from mybudongsan.storage.repositories import AssessmentRepository, RequestRepository, RunRepository
+from mybudongsan.storage.repositories import (
+    AssessmentRepository,
+    EvidenceRepository,
+    ListingRepository,
+    RequestRepository,
+    RunRepository,
+)
 
 
 def test_request_versions_are_immutable(database) -> None:  # type: ignore[no-untyped-def]
@@ -136,6 +143,98 @@ def test_assessment_repository_round_trips_complete_evaluation_json(database) ->
     loaded = AssessmentRepository(database).get("run-assessment", listing_id)
     assert loaded.evaluation_input == evaluation_input
     assert loaded.evaluation_result == evaluate_listing(evaluation_input)
+
+
+def test_report_projection_reads_latest_listing_and_only_run_owned_evidence(database) -> None:  # type: ignore[no-untyped-def]
+    request = SearchRequest(
+        request_id="req-projection",
+        version=1,
+        regions=[RegionCriterion(name="서울 강서구")],
+        budget=MoneyRange(minimum=Decimal(1), maximum=Decimal(2)),
+    )
+    RequestRepository(database).save_version(request)
+    RunRepository(database).create("run-projection", request.request_id, request.version)
+    RunRepository(database).create("run-other", request.request_id, request.version)
+    evidence_repository = EvidenceRepository(database)
+    persisted = evidence_repository.save_for_run(
+        "run-projection",
+        (
+            EvidenceObservation(
+                evidence_id=1,
+                claim="가격 근거",
+                source_url="fixture://projection/price",
+                source_type="fixture",
+                accessed_at=datetime(2026, 9, 21, tzinfo=UTC),
+            ),
+            EvidenceObservation(
+                evidence_id=2,
+                claim="같은 실행의 미참조 근거",
+                source_url="fixture://projection/unreferenced",
+                source_type="fixture",
+                accessed_at=datetime(2026, 9, 21, tzinfo=UTC),
+            ),
+        ),
+    )
+    evidence_repository.save_for_run(
+        "run-other",
+        (
+            EvidenceObservation(
+                evidence_id=1,
+                claim="다른 실행 근거",
+                source_url="fixture://other/price",
+                source_type="fixture",
+                accessed_at=datetime(2026, 9, 21, tzinfo=UTC),
+            ),
+        ),
+    )
+    evidence_id = persisted[0].evidence_id
+    listing_repository = ListingRepository(database)
+    first = ListingObservation(
+        source="fixture",
+        source_listing_id="projection-1",
+        asking_price=700_000_000,
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        raw_evidence_ids=(evidence_id,),
+    )
+    latest = first.model_copy(
+        update={
+            "asking_price": Decimal(680_000_000),
+            "observed_at": datetime(2026, 9, 22, tzinfo=UTC),
+        }
+    )
+    listing_id = listing_repository.ingest_bundle("run-projection", (first,))[0].listing_id
+    listing_repository.ingest_bundle("run-projection", (latest,))
+    evaluation_input = EvaluationInput(
+        active_listing_confirmed=True,
+        minimum_evidence_met=True,
+        price=80,
+        confidence=90,
+        evidence_ids_by_dimension={"price": [evidence_id]},
+    )
+    AssessmentRepository(database).save(
+        run_id="run-projection",
+        listing_id=listing_id,
+        evaluation_input=evaluation_input,
+    )
+    later_run_snapshot = latest.model_copy(
+        update={
+            "asking_price": Decimal(650_000_000),
+            "observed_at": datetime(2026, 9, 23, tzinfo=UTC),
+            "raw_evidence_ids": (),
+        }
+    )
+    listing_repository.ingest_bundle("run-other", (later_run_snapshot,))
+
+    projected = AssessmentRepository(database).list_for_run("run-projection")
+    evidence = evidence_repository.list_for_run(
+        "run-projection",
+        evidence_ids=(evidence_id,),
+    )
+
+    assert len(projected) == 1
+    assert projected[0].listing.asking_price == Decimal(680_000_000)
+    assert projected[0].assessment.evaluation_result == evaluate_listing(evaluation_input)
+    assert [item.claim for item in evidence] == ["가격 근거"]
 
 
 def test_assessment_repository_recomputes_canonical_result_and_rejects_forged_result(
