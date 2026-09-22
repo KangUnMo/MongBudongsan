@@ -40,6 +40,7 @@ from mybudongsan.storage.database import Database
 from mybudongsan.storage.repositories import (
     AssessmentRepository,
     EvidenceRepository,
+    NotificationRecord,
     RequestRepository,
     RunRecord,
     RunRepository,
@@ -231,22 +232,33 @@ def notify_pending(
 
     def operation() -> None:
         records = NotificationOutbox(_database(context)).pending(run_id, channel=channel)
-        for record in records:
-            typer.echo(
-                json.dumps(
-                    {
-                        "event_id": record.event_id,
-                        "run_id": record.run_id,
-                        "event_type": record.event_type.value,
-                        "channel": record.channel,
-                        "payload": record.payload,
-                        "status": record.status,
-                        "attempt_count": record.attempt_count,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-            )
+        _echo_notification_records(records)
+
+    _run(context, operation)
+
+
+@notify_app.command("status")
+def notify_status(
+    context: typer.Context,
+    run_id: str,
+    state: Annotated[
+        str,
+        typer.Option("--state", help="pending, dispatching, failed 또는 sent"),
+    ],
+    channel: Annotated[
+        str | None,
+        typer.Option("--channel", help="선택 사항: kakao 또는 gmail 채널"),
+    ] = None,
+) -> None:
+    """현재 outbox 상태와 claim token을 변경 없이 JSON Lines로 조회합니다."""
+
+    def operation() -> None:
+        records = NotificationOutbox(_database(context)).status(
+            run_id,
+            state=state,
+            channel=channel,
+        )
+        _echo_notification_records(records)
 
     _run(context, operation)
 
@@ -262,11 +274,19 @@ def notify_ack(
             help="공급자 메시지 ID 또는 provider_acknowledged",
         ),
     ],
+    claim_token: Annotated[
+        str,
+        typer.Option("--claim-token", help="pending/status 출력의 현재 claim token"),
+    ],
 ) -> None:
     """Claim된 PlayMCP 또는 Gmail 전달의 공급자 확인을 기록합니다."""
 
     def operation() -> None:
-        record = NotificationOutbox(_database(context)).mark_sent(event_id, provider_id)
+        record = NotificationOutbox(_database(context)).mark_sent(
+            event_id,
+            provider_id,
+            claim_token=claim_token,
+        )
         typer.echo(f"event_id={record.event_id} status={record.status}")
 
     _run(context, operation)
@@ -277,11 +297,19 @@ def notify_fail(
     context: typer.Context,
     event_id: int,
     error: Annotated[str, typer.Option("--error", help="비밀값이 없는 안전한 오류 설명")],
+    claim_token: Annotated[
+        str,
+        typer.Option("--claim-token", help="pending/status 출력의 현재 claim token"),
+    ],
 ) -> None:
     """Claim된 전달을 정제된 오류와 함께 수동 재시도 가능 상태로 돌립니다."""
 
     def operation() -> None:
-        record = NotificationOutbox(_database(context)).mark_failed(event_id, error)
+        record = NotificationOutbox(_database(context)).mark_failed(
+            event_id,
+            error,
+            claim_token=claim_token,
+        )
         typer.echo(f"event_id={record.event_id} status={record.status}")
 
     _run(context, operation)
@@ -417,6 +445,26 @@ def watch_refresh(context: typer.Context, previous_path: Path, current_path: Pat
 
 def _runtime(context: typer.Context) -> Runtime:
     return cast(Runtime, context.find_root().obj)
+
+
+def _echo_notification_records(records: tuple[NotificationRecord, ...]) -> None:
+    for record in records:
+        typer.echo(
+            json.dumps(
+                {
+                    "event_id": record.event_id,
+                    "run_id": record.run_id,
+                    "event_type": record.event_type.value,
+                    "channel": record.channel,
+                    "payload": record.payload,
+                    "status": record.status,
+                    "attempt_count": record.attempt_count,
+                    "claim_token": record.claim_token,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
 
 
 def _database(context: typer.Context) -> Database:

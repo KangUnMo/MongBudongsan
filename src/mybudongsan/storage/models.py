@@ -139,5 +139,6 @@ class NotificationEventModel(Base):
     attempt_count: Mapped[int] = mapped_column(default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
     provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    claim_token: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

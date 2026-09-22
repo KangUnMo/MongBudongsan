@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from secrets import token_urlsafe
 from types import MappingProxyType
 
 from sqlalchemy import desc, select, text
@@ -545,6 +546,7 @@ class NotificationRecord:
     attempt_count: int
     last_error: str | None
     provider_message_id: str | None
+    claim_token: str | None
     created_at: datetime
     sent_at: datetime | None
 
@@ -614,6 +616,7 @@ class NotificationRepository:
                     attempt_count=0,
                     last_error=None,
                     provider_message_id=None,
+                    claim_token=None,
                     created_at=created_at,
                     sent_at=None,
                 )
@@ -642,33 +645,68 @@ class NotificationRepository:
             for model in models:
                 model.status = "dispatching"
                 model.attempt_count += 1
+                model.claim_token = token_urlsafe(32)
             session.flush()
             return tuple(self._to_record(item) for item in models)
 
-    def mark_sent(self, event_id: int, provider_message_id: str) -> NotificationRecord:
+    def status(
+        self,
+        run_id: str,
+        *,
+        state: str,
+        channel: str | None = None,
+    ) -> tuple[NotificationRecord, ...]:
+        if state not in {"pending", "dispatching", "failed", "sent"}:
+            raise ValueError("state must be pending, dispatching, failed, or sent")
+        if channel is not None and channel not in {"kakao", "gmail"}:
+            raise ValueError("channel must be kakao or gmail")
+        with self._database.session() as session:
+            ListingRepository._require_run(session, run_id)
+            statement = select(NotificationEventModel).where(
+                NotificationEventModel.run_id == run_id,
+                NotificationEventModel.status == state,
+            )
+            if channel is not None:
+                statement = statement.where(NotificationEventModel.channel == channel)
+            models = session.scalars(statement.order_by(NotificationEventModel.id))
+            return tuple(self._to_record(item) for item in models)
+
+    def mark_sent(
+        self,
+        event_id: int,
+        provider_message_id: str,
+        *,
+        claim_token: str,
+    ) -> NotificationRecord:
         provider_message_id = provider_message_id.strip()
         if not provider_message_id:
             raise ValueError("provider message ID or provider_acknowledged is required")
+        claim_token = self._require_claim_token(claim_token)
         with self._write_session() as session:
-            model = self._get(session, event_id)
-            if model.status != "dispatching":
-                raise ValueError("notification event must be dispatching before acknowledgement")
+            model = self._get_claimed(session, event_id, claim_token)
             model.status = "sent"
             model.last_error = None
             model.provider_message_id = provider_message_id
+            model.claim_token = None
             model.sent_at = datetime.now(UTC)
             session.flush()
             return self._to_record(model)
 
-    def mark_failed(self, event_id: int, error: str) -> NotificationRecord:
+    def mark_failed(
+        self,
+        event_id: int,
+        error: str,
+        *,
+        claim_token: str,
+    ) -> NotificationRecord:
         safe_error = redact_google_text(error).strip()[:500]
+        claim_token = self._require_claim_token(claim_token)
         with self._write_session() as session:
-            model = self._get(session, event_id)
-            if model.status != "dispatching":
-                raise ValueError("notification event must be dispatching before failure")
+            model = self._get_claimed(session, event_id, claim_token)
             model.status = "failed"
             model.last_error = safe_error
             model.provider_message_id = None
+            model.claim_token = None
             model.sent_at = None
             session.flush()
             return self._to_record(model)
@@ -681,11 +719,28 @@ class NotificationRepository:
             yield session
 
     @staticmethod
-    def _get(session: Session, event_id: int) -> NotificationEventModel:
-        model = session.get(NotificationEventModel, event_id)
+    def _get_claimed(
+        session: Session,
+        event_id: int,
+        claim_token: str,
+    ) -> NotificationEventModel:
+        model = session.scalar(
+            select(NotificationEventModel).where(
+                NotificationEventModel.id == event_id,
+                NotificationEventModel.status == "dispatching",
+                NotificationEventModel.claim_token == claim_token,
+            )
+        )
         if model is None:
-            raise ValueError(f"notification event not found: {event_id}")
+            raise ValueError("claim token is stale or event is not dispatching")
         return model
+
+    @staticmethod
+    def _require_claim_token(claim_token: str) -> str:
+        claim_token = claim_token.strip()
+        if not claim_token:
+            raise ValueError("claim token is required")
+        return claim_token
 
     @staticmethod
     def _to_record(model: NotificationEventModel) -> NotificationRecord:
@@ -699,6 +754,7 @@ class NotificationRepository:
             attempt_count=model.attempt_count,
             last_error=model.last_error,
             provider_message_id=model.provider_message_id,
+            claim_token=model.claim_token,
             created_at=model.created_at,
             sent_at=model.sent_at,
         )

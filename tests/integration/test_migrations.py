@@ -294,7 +294,7 @@ def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
         )
     engine.dispose()
 
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0004")
     engine = create_engine(database_url)
     columns = {
         column["name"]: column
@@ -319,6 +319,22 @@ def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
     assert legacy["attempt_count"] == 1
     assert legacy["created_at"] == legacy["sent_at"]
     assert legacy["provider_message_id"] == "provider_acknowledged"
+    engine.dispose()
+
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(database_url)
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("notification_events")
+    }
+    assert columns["claim_token"]["nullable"] is True
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT claim_token FROM notification_events "
+                "WHERE run_id = 'notify-run'"
+            )
+        ).scalar_one() is None
     engine.dispose()
 
 

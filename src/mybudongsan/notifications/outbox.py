@@ -22,8 +22,38 @@ class NotificationOutbox:
         """Atomically claim retryable rows by moving them to dispatching."""
         return self._repository.pending(run_id, channel=channel)
 
-    def mark_sent(self, event_id: int, provider_message_id: str) -> NotificationRecord:
-        return self._repository.mark_sent(event_id, provider_message_id)
+    def status(
+        self,
+        run_id: str,
+        *,
+        state: str,
+        channel: str | None = None,
+    ) -> tuple[NotificationRecord, ...]:
+        """Read delivery state without claiming or mutating rows."""
+        return self._repository.status(run_id, state=state, channel=channel)
 
-    def mark_failed(self, event_id: int, error: str) -> NotificationRecord:
-        return self._repository.mark_failed(event_id, error)
+    def mark_sent(
+        self,
+        event_id: int,
+        provider_message_id: str,
+        *,
+        claim_token: str,
+    ) -> NotificationRecord:
+        return self._repository.mark_sent(
+            event_id,
+            provider_message_id,
+            claim_token=claim_token,
+        )
+
+    def mark_failed(
+        self,
+        event_id: int,
+        error: str,
+        *,
+        claim_token: str,
+    ) -> NotificationRecord:
+        return self._repository.mark_failed(
+            event_id,
+            error,
+            claim_token=claim_token,
+        )

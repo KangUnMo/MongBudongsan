@@ -109,11 +109,16 @@ def test_ack_requires_provider_id_and_resume_does_not_redeliver(database: Databa
     claimed, = outbox.pending("run-notify", channel="kakao")
     assert claimed.status == "dispatching"
     assert claimed.attempt_count == 1
+    assert claimed.claim_token
 
     with pytest.raises(ValueError, match="provider"):
-        outbox.mark_sent(record.event_id, "")
+        outbox.mark_sent(record.event_id, "", claim_token=claimed.claim_token)
 
-    sent = outbox.mark_sent(record.event_id, "provider_acknowledged")
+    sent = outbox.mark_sent(
+        record.event_id,
+        "provider_acknowledged",
+        claim_token=claimed.claim_token,
+    )
     assert sent.status == "sent"
     assert sent.attempt_count == 1
     assert sent.provider_message_id == "provider_acknowledged"
@@ -132,10 +137,12 @@ def test_failure_bookkeeping_sanitizes_errors(database: Database) -> None:
         NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
     )[0]
 
-    _claimed, = outbox.pending("run-notify", channel="kakao")
+    claimed, = outbox.pending("run-notify", channel="kakao")
+    assert claimed.claim_token
     failed = outbox.mark_failed(
         record.event_id,
         "access_token=secret token kakao-secret api_key=playmcp-secret",
+        claim_token=claimed.claim_token,
     )
 
     assert failed.status == "failed"
@@ -144,8 +151,13 @@ def test_failure_bookkeeping_sanitizes_errors(database: Database) -> None:
     retry, = outbox.pending("run-notify", channel="kakao")
     assert retry.status == "dispatching"
     assert retry.attempt_count == 2
+    assert retry.claim_token and retry.claim_token != claimed.claim_token
 
-    sent = outbox.mark_sent(record.event_id, "kakao-retry-1")
+    sent = outbox.mark_sent(
+        record.event_id,
+        "kakao-retry-1",
+        claim_token=retry.claim_token,
+    )
     assert sent.status == "sent"
     assert sent.attempt_count == 2
     assert outbox.pending("run-notify", channel="kakao") == ()
@@ -173,9 +185,14 @@ def test_failure_bookkeeping_redacts_entire_auth_header_values(
         "run-notify",
         NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
     )
-    outbox.pending("run-notify", channel="kakao")
+    claimed, = outbox.pending("run-notify", channel="kakao")
+    assert claimed.claim_token
 
-    failed = outbox.mark_failed(record.event_id, unsafe_message)
+    failed = outbox.mark_failed(
+        record.event_id,
+        unsafe_message,
+        claim_token=claimed.claim_token,
+    )
 
     assert secret not in (failed.last_error or "")
     with database.session() as session:
@@ -193,14 +210,78 @@ def test_ack_and_fail_require_a_claimed_dispatching_state(database: Database) ->
     )
 
     with pytest.raises(ValueError, match="dispatching"):
-        outbox.mark_sent(record.event_id, "provider-1")
+        outbox.mark_sent(record.event_id, "provider-1", claim_token="unclaimed")
     with pytest.raises(ValueError, match="dispatching"):
-        outbox.mark_failed(record.event_id, "safe timeout")
+        outbox.mark_failed(record.event_id, "safe timeout", claim_token="unclaimed")
 
-    outbox.pending("run-notify", channel="kakao")
-    outbox.mark_sent(record.event_id, "provider-1")
+    claimed, = outbox.pending("run-notify", channel="kakao")
+    assert claimed.claim_token
+    outbox.mark_sent(record.event_id, "provider-1", claim_token=claimed.claim_token)
     with pytest.raises(ValueError, match="dispatching"):
-        outbox.mark_failed(record.event_id, "safe timeout")
+        outbox.mark_failed(record.event_id, "safe timeout", claim_token=claimed.claim_token)
+
+
+def test_stale_attempt_token_cannot_ack_or_fail_a_newer_claim(database: Database) -> None:
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    record, = outbox.enqueue(
+        "run-notify",
+        NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
+    )
+    attempt_one, = outbox.pending("run-notify", channel="kakao")
+    assert attempt_one.claim_token
+    outbox.mark_failed(
+        record.event_id,
+        "safe timeout",
+        claim_token=attempt_one.claim_token,
+    )
+    attempt_two, = outbox.pending("run-notify", channel="kakao")
+    assert attempt_two.claim_token
+    assert attempt_two.claim_token != attempt_one.claim_token
+    assert attempt_two.attempt_count == 2
+
+    with pytest.raises(ValueError, match="stale"):
+        outbox.mark_sent(
+            record.event_id,
+            "late-provider-id",
+            claim_token=attempt_one.claim_token,
+        )
+    with pytest.raises(ValueError, match="stale"):
+        outbox.mark_failed(
+            record.event_id,
+            "late failure",
+            claim_token=attempt_one.claim_token,
+        )
+
+    current, = outbox.status("run-notify", state="dispatching", channel="kakao")
+    assert current.claim_token == attempt_two.claim_token
+    assert current.attempt_count == 2
+
+
+def test_read_only_status_recovers_a_claim_lost_before_output(database: Database) -> None:
+    _seed_run(database)
+    outbox = NotificationOutbox(database)
+    record, = outbox.enqueue(
+        "run-notify",
+        NotificationEvent(NotificationEventType.WORK_STARTED, "조사를 시작했습니다."),
+    )
+
+    lost_output_claim, = outbox.pending("run-notify", channel="kakao")
+    recovered, = outbox.status("run-notify", state="dispatching", channel="kakao")
+    observed_again, = outbox.status("run-notify", state="dispatching", channel="kakao")
+
+    assert lost_output_claim.claim_token
+    assert recovered.event_id == record.event_id
+    assert recovered.claim_token == lost_output_claim.claim_token
+    assert recovered.attempt_count == 1
+    assert observed_again == recovered
+
+    failed = outbox.mark_failed(
+        recovered.event_id,
+        "confirmed not delivered",
+        claim_token=recovered.claim_token or "",
+    )
+    assert failed.status == "failed"
 
 
 def test_concurrent_pending_claims_never_return_the_same_event(tmp_path: Path) -> None:
@@ -406,7 +487,12 @@ def test_gmail_delivery_uses_claim_ack_protocol_and_is_not_replayed(
         outcome="완료",
         conclusion="추천 후보를 정리했습니다.",
     )
-    outbox.mark_sent(claimed.event_id, provider_id)
+    assert claimed.claim_token
+    outbox.mark_sent(
+        claimed.event_id,
+        provider_id,
+        claim_token=claimed.claim_token,
+    )
     outbox.enqueue("run-notify", terminal)
 
     assert outbox.pending("run-notify", channel="gmail") == ()
@@ -438,19 +524,42 @@ def test_notify_cli_exposes_pending_kakao_payload_and_records_ack_and_failure(
     assert pending.exit_code == 0, pending.output
     payloads = [json.loads(line) for line in pending.output.splitlines()]
     assert [item["event_id"] for item in payloads] == [first.event_id, second.event_id]
+    assert all(item["claim_token"] for item in payloads)
     assert payloads[0]["payload"] == {
         "run_id": "run-notify",
         "event_type": "work_started",
         "message": "조사를 시작했습니다.",
     }
 
+    status_arguments = [
+        "--db-url", database_url, "notify", "status", "run-notify",
+        "--state", "dispatching", "--channel", "kakao",
+    ]
+    status = runner.invoke(app, status_arguments)
+    status_again = runner.invoke(app, status_arguments)
+    assert status.exit_code == 0, status.output
+    assert status_again.exit_code == 0, status_again.output
+    assert status.output == status_again.output
+    recovered = [json.loads(line) for line in status.output.splitlines()]
+    assert [item["claim_token"] for item in recovered] == [
+        payloads[0]["claim_token"],
+        payloads[1]["claim_token"],
+    ]
+    assert all(item["attempt_count"] == 1 for item in recovered)
+
     acknowledged = runner.invoke(
         app,
-        ["--db-url", database_url, "notify", "ack", str(first.event_id), "--provider-id", "kakao-1"],
+        [
+            "--db-url", database_url, "notify", "ack", str(first.event_id),
+            "--provider-id", "kakao-1", "--claim-token", payloads[0]["claim_token"],
+        ],
     )
     failed = runner.invoke(
         app,
-        ["--db-url", database_url, "notify", "fail", str(second.event_id), "--error", "safe timeout"],
+        [
+            "--db-url", database_url, "notify", "fail", str(second.event_id),
+            "--error", "safe timeout", "--claim-token", payloads[1]["claim_token"],
+        ],
     )
     assert acknowledged.exit_code == 0, acknowledged.output
     assert failed.exit_code == 0, failed.output
@@ -476,7 +585,9 @@ def test_notify_cli_redacts_runtime_errors_in_normal_and_debug_output(
         raise RuntimeError(unsafe_message)
 
     monkeypatch.setattr(NotificationOutbox, "mark_failed", fail)
-    arguments = ["notify", "fail", "1", "--error", "safe input"]
+    arguments = [
+        "notify", "fail", "1", "--error", "safe input", "--claim-token", "test-token"
+    ]
 
     normal = CliRunner().invoke(app, arguments)
     debug = CliRunner().invoke(app, ["--debug", *arguments])
