@@ -9,6 +9,7 @@ from sqlalchemy import Engine, create_engine, inspect, text
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
 from mybudongsan.domain.scoring import EvaluationInput, evaluate_listing
+from mybudongsan.research.contracts import ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import EvidenceModel, ListingModel
 from mybudongsan.storage.repositories import AssessmentRepository, RequestRepository, RunRepository
@@ -196,6 +197,144 @@ def test_listing_snapshot_run_ownership_migration_upgrades_and_downgrades(
     engine = create_engine(database_url)
     assert "run_id" not in {column["name"] for column in inspect(engine).get_columns("listing_snapshots")}
     engine.dispose()
+
+
+def test_snapshot_run_ownership_migration_backfills_an_unambiguous_legacy_assessment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alembic_config, database_url = _migration_config(tmp_path, monkeypatch, "safe-backfill")
+    command.upgrade(alembic_config, "0002")
+    engine = create_engine(database_url)
+    _seed_0002_report_projection_data(engine, ("legacy-run",))
+    engine.dispose()
+
+    command.upgrade(alembic_config, "0003")
+    engine = create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT run_id FROM listing_snapshots WHERE id = 1")
+        ).scalar_one() == "legacy-run"
+    engine.dispose()
+
+    projected = AssessmentRepository(Database(database_url)).list_for_run("legacy-run")
+    assert len(projected) == 1
+    assert projected[0].listing.source_listing_id == "legacy-listing"
+
+    command.downgrade(alembic_config, "0002")
+    engine = create_engine(database_url)
+    assert "run_id" not in {
+        column["name"] for column in inspect(engine).get_columns("listing_snapshots")
+    }
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT asking_price FROM listing_snapshots WHERE id = 1")
+        ).scalar_one() == 700_000_000
+    engine.dispose()
+
+
+def test_snapshot_run_ownership_migration_leaves_ambiguous_legacy_rows_unowned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alembic_config, database_url = _migration_config(tmp_path, monkeypatch, "ambiguous-backfill")
+    command.upgrade(alembic_config, "0002")
+    engine = create_engine(database_url)
+    _seed_0002_report_projection_data(engine, ("legacy-run-one", "legacy-run-two"))
+    engine.dispose()
+
+    command.upgrade(alembic_config, "0003")
+    engine = create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT run_id FROM listing_snapshots WHERE id = 1")
+        ).scalar_one() is None
+    engine.dispose()
+
+    with pytest.raises(ValueError, match="레거시 매물 스냅샷"):
+        AssessmentRepository(Database(database_url)).list_for_run("legacy-run-one")
+
+
+def _migration_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> tuple[Config, str]:
+    project_root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite+pysqlite:///{tmp_path / f'{name}.sqlite3'}"
+    monkeypatch.setenv("MYBUDONGSAN_DB_URL", database_url)
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+    return alembic_config, database_url
+
+
+def _seed_0002_report_projection_data(engine: Engine, run_ids: tuple[str, ...]) -> None:
+    observation = ListingObservation(
+        source="legacy-fixture",
+        source_listing_id="legacy-listing",
+        asking_price=700_000_000,
+        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+    )
+    evaluation_input = EvaluationInput(
+        active_listing_confirmed=False,
+        minimum_evidence_met=False,
+    )
+    evaluation_result = evaluate_listing(evaluation_input)
+    created_at = "2026-09-21 00:00:00.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO search_requests (request_id, version, payload, created_at) "
+                "VALUES ('legacy-request', 1, :payload, :created_at)"
+            ),
+            {"payload": json.dumps({}), "created_at": created_at},
+        )
+        for run_id in run_ids:
+            connection.execute(
+                text(
+                    "INSERT INTO research_runs "
+                    "(run_id, request_id, request_version, status, current_stage, checkpoint_payload, "
+                    "error_message, started_at, completed_at) "
+                    "VALUES (:run_id, 'legacy-request', 1, 'running', 'deep_research_complete', "
+                    "'{}', NULL, :created_at, :created_at)"
+                ),
+                {"run_id": run_id, "created_at": created_at},
+            )
+        listing_id = connection.execute(
+            text(
+                "INSERT INTO listings (source, source_listing_id, created_at) "
+                "VALUES ('legacy-fixture', 'legacy-listing', :created_at)"
+            ),
+            {"created_at": created_at},
+        ).lastrowid
+        assert listing_id is not None
+        connection.execute(
+            text(
+                "INSERT INTO listing_snapshots "
+                "(listing_id, asking_price, status, payload, observed_at) "
+                "VALUES (:listing_id, 700000000, NULL, :payload, :observed_at)"
+            ),
+            {
+                "listing_id": listing_id,
+                "payload": json.dumps(observation.model_dump(mode="json")),
+                "observed_at": created_at,
+            },
+        )
+        for run_id in run_ids:
+            connection.execute(
+                text(
+                    "INSERT INTO assessments "
+                    "(run_id, listing_id, passed_gates, score, risks, rationale, input_payload, "
+                    "result_payload, created_at) "
+                    "VALUES (:run_id, :listing_id, :passed_gates, NULL, NULL, NULL, :input_payload, "
+                    ":result_payload, :created_at)"
+                ),
+                {
+                    "run_id": run_id,
+                    "listing_id": listing_id,
+                    "passed_gates": evaluation_result.eligible,
+                    "input_payload": json.dumps(evaluation_input.model_dump(mode="json")),
+                    "result_payload": json.dumps(evaluation_result.model_dump(mode="json")),
+                    "created_at": created_at,
+                },
+            )
 
 
 def _seed_legacy_assessment(engine: Engine) -> int:

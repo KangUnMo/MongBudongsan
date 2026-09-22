@@ -417,6 +417,20 @@ class AssessmentRepository:
                     )
                 )
                 if snapshot is None:
+                    legacy_snapshot = session.scalar(
+                        select(ListingSnapshotModel.id)
+                        .where(
+                            ListingSnapshotModel.listing_id == assessment.listing_id,
+                            ListingSnapshotModel.run_id.is_(None),
+                        )
+                        .limit(1)
+                    )
+                    if legacy_snapshot is not None:
+                        raise ValueError(
+                            "레거시 매물 스냅샷의 실행 소유권이 불명확하거나 "
+                            "0003 마이그레이션이 필요합니다: "
+                            f"{assessment.listing_id}"
+                        )
                     raise ValueError(
                         f"listing snapshot not found: {assessment.listing_id}"
                     )
