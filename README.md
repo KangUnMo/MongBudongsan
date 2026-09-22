@@ -99,9 +99,41 @@ uv run mybudongsan watch refresh .local/previous.json .local/current.json
 
 출력은 가격, 상태, URL, 원본 매물 ID의 변경과 가능한 재등록/삭제를 보여 줍니다. 스케줄러나 알림 전송은 하지 않습니다.
 
+## 명시적 Google Workspace 동기화
+
+기본 조사 흐름은 계속 로컬 전용입니다. 아래 명령을 사용자가 명시적으로 실행할 때만 Google API를 호출합니다. SQLite와 이미 발행한 로컬 아티팩트가 정본이며, Sheets와 Drive는 일방향 복사본입니다.
+
+처음 한 번만 로컬 OAuth client secret 경로로 로그인합니다. 이 명령만 로컬 브라우저 동의 화면을 열 수 있습니다. 사용자 자격 증명은 macOS Keychain의 `mybudongsan-google` 서비스에만 저장되며 token 파일은 만들지 않습니다. 만료된 자격 증명은 refresh token으로 갱신한 뒤 Keychain에 다시 저장합니다.
+
+```bash
+uv run mybudongsan google login --client-secret /안전한/경로/client_secret.json
+```
+
+권한 범위는 사용자가 선택한 Spreadsheet와 앱이 생성하거나 사용자가 선택한 Drive 파일에 필요한 `spreadsheets`, `drive.file`뿐입니다. client secret, access/refresh/ID token, Keychain의 자격 증명 JSON은 명령 출력이나 로그에 표시하지 않습니다.
+
+`검색 요청` 시트의 2행 이후에는 아래 순서의 10개 열을 넣습니다. `regions`는 `[{"name":"서울 강서구","allow_expansion":false}]` 형식의 JSON이고, 목록 열은 ` | `로 구분합니다.
+
+```text
+request_id, version, regions, budget_minimum, budget_maximum, required,
+preferred, excluded, special_questions, status
+```
+
+가져오기는 해당 `검색 요청` 행만 읽어 Pydantic 검증 후 SQLite 요청 버전으로 저장합니다. 결과 동기화는 명시 A1 범위에 안정적인 헤더를 쓰고, `검색 요청`, `조사 현황`, `추천 결과`, `관심 매물` 중 없는 탭만 추가합니다. 결과 탭을 다시 읽어 SQLite를 갱신하지 않습니다.
+
+```bash
+uv run mybudongsan sheets import-request --spreadsheet-id SPREADSHEET_ID --row 2
+uv run mybudongsan sheets sync-run RUN_ID --spreadsheet-id SPREADSHEET_ID
+```
+
+Drive 업로드는 저장된 `report_complete` 체크포인트가 가리키는 아티팩트만 사용합니다. 선택한 상위 폴더 아래 `YYYY/MM/<request_id>_<run_slug>/` 구조로 `report.md`, `candidates.csv`, `run-data.json`, 그리고 존재하는 근거 파일을 올립니다. 폴더와 파일 이름/부모를 먼저 검색하므로 같은 실행을 다시 올리면 중복 생성 대신 기존 파일을 갱신합니다.
+
+```bash
+uv run mybudongsan drive upload-run RUN_ID --folder-id DRIVE_FOLDER_ID
+```
+
 ## 자격 증명과 오류 처리
 
-이 단계의 CLI는 자격 증명을 요구하거나 저장하지 않습니다. `.env`, OAuth client secret, token 파일, `data/`, 생성 아티팩트는 Git에 넣지 마세요. 특히 비밀값을 요청 JSON, fixture, SQLite, 보고서 또는 명령 출력에 넣으면 안 됩니다.
+`.env`, OAuth client secret, token 파일, `data/`, 생성 아티팩트는 Git에 넣지 마세요. 특히 비밀값을 요청 JSON, fixture, SQLite, 보고서 또는 명령 출력에 넣으면 안 됩니다.
 
 사용자 오류와 명령 파싱 오류(누락 인자, 잘못된 옵션 값, 알 수 없는 명령)는 `오류:`로 시작하는 한국어 메시지와 0이 아닌 종료 코드로 반환됩니다. 진단이 필요할 때만 전역 옵션 `--debug`을 명령 그룹보다 앞에 붙여 traceback을 확인합니다.
 

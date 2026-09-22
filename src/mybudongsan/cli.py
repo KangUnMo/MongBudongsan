@@ -21,6 +21,9 @@ from mybudongsan.config import Settings
 from mybudongsan.domain.requests import SearchRequest
 from mybudongsan.domain.runs import RunStage
 from mybudongsan.domain.scoring import DIMENSIONS, DimensionEvidence
+from mybudongsan.integrations.drive import DriveBackup, create_drive_service
+from mybudongsan.integrations.google_auth import GoogleCredentialStore
+from mybudongsan.integrations.sheets import SheetsProjection, create_sheets_service
 from mybudongsan.reports.publication import ReportPublicationService
 from mybudongsan.reports.renderer import (
     AssessedCandidate,
@@ -37,6 +40,7 @@ from mybudongsan.storage.repositories import (
     AssessmentRepository,
     EvidenceRepository,
     RequestRepository,
+    RunRecord,
     RunRepository,
 )
 from mybudongsan.workflows.research_run import ResearchRunService
@@ -103,10 +107,16 @@ db_app = typer.Typer(help="SQLite 데이터베이스 관리")
 request_app = typer.Typer(help="검색 요청 관리")
 run_app = typer.Typer(help="조사 실행 관리")
 watch_app = typer.Typer(help="수동 WATCH 비교")
+google_app = typer.Typer(help="명시적으로 실행하는 Google OAuth 로그인")
+sheets_app = typer.Typer(help="Google Sheets 요청/결과 투영")
+drive_app = typer.Typer(help="Google Drive 보고서 백업")
 app.add_typer(db_app, name="db")
 app.add_typer(request_app, name="request")
 app.add_typer(run_app, name="run")
 app.add_typer(watch_app, name="watch")
+app.add_typer(google_app, name="google")
+app.add_typer(sheets_app, name="sheets")
+app.add_typer(drive_app, name="drive")
 
 
 @dataclass(frozen=True)
@@ -137,6 +147,70 @@ def request_import(context: typer.Context, request_path: Path) -> None:
         request = SearchRequest.model_validate_json(request_path.read_text(encoding="utf-8"))
         RequestRepository(_database(context)).save_version(request)
         typer.echo(f"request_id={request.request_id} version={request.version}")
+
+    _run(context, operation)
+
+
+@google_app.command("login")
+def google_login(
+    context: typer.Context,
+    client_secret: Annotated[Path, typer.Option("--client-secret", help="로컬 OAuth client secret JSON")],
+) -> None:
+    """명시적으로 요청했을 때에만 로컬 OAuth 동의 브라우저를 엽니다."""
+    _run(context, lambda: GoogleCredentialStore(client_secret).login())
+
+
+@sheets_app.command("import-request")
+def sheets_import_request(
+    context: typer.Context,
+    spreadsheet_id: Annotated[str, typer.Option(help="사용자가 선택한 Google Spreadsheet ID")],
+    row: Annotated[int, typer.Option(min=2, help="검색 요청 행 번호")],
+) -> None:
+    def operation() -> None:
+        request = SheetsProjection(create_sheets_service(GoogleCredentialStore())).import_request(
+            spreadsheet_id, row
+        )
+        RequestRepository(_database(context)).save_version(request)
+        typer.echo(f"request_id={request.request_id} version={request.version}")
+
+    _run(context, operation)
+
+
+@sheets_app.command("sync-run")
+def sheets_sync_run(
+    context: typer.Context,
+    run_id: str,
+    spreadsheet_id: Annotated[str, typer.Option(help="사용자가 선택한 Google Spreadsheet ID")],
+) -> None:
+    def operation() -> None:
+        database = _database(context)
+        run = RunRepository(database).get(run_id)
+        request = RequestRepository(database).get_version(run.request_id, run.request_version)
+        bundle, _ = _stored_report_bundle(run)
+        SheetsProjection(create_sheets_service(GoogleCredentialStore())).sync_run(
+            spreadsheet_id, request, _sheet_run_payload(run), _sheet_candidates(bundle)
+        )
+        typer.echo(f"run_id={run_id} spreadsheet_id={spreadsheet_id}")
+
+    _run(context, operation)
+
+
+@drive_app.command("upload-run")
+def drive_upload_run(
+    context: typer.Context,
+    run_id: str,
+    folder_id: Annotated[str, typer.Option(help="사용자가 선택한 Drive 상위 폴더 ID")],
+) -> None:
+    def operation() -> None:
+        run = RunRepository(_database(context)).get(run_id)
+        _, artifact_directory = _stored_report_bundle(run)
+        report_checkpoint = run.checkpoints.get(RunStage.REPORT_COMPLETE)
+        if report_checkpoint is None:
+            raise ValueError("보고서가 발행된 실행만 Drive에 업로드할 수 있습니다")
+        DriveBackup(create_drive_service(GoogleCredentialStore())).upload_run(
+            folder_id, run.request_id, run.run_id, report_checkpoint.completed_at, artifact_directory
+        )
+        typer.echo(f"run_id={run_id} folder_id={folder_id}")
 
     _run(context, operation)
 
@@ -279,6 +353,51 @@ def _database(context: typer.Context) -> Database:
 
 def _run_service(database: Database) -> ResearchRunService:
     return ResearchRunService(RequestRepository(database), RunRepository(database))
+
+
+def _stored_report_bundle(run: RunRecord) -> tuple[ReportBundle, Path]:
+    """Read only the published artifact path recorded by the canonical SQLite run."""
+    checkpoint = run.checkpoints.get(RunStage.REPORT_COMPLETE)
+    if checkpoint is None:
+        raise ValueError("보고서가 발행된 실행만 Google에 동기화할 수 있습니다")
+    stored_path = checkpoint.checkpoint.get("report_path")
+    if not isinstance(stored_path, str):
+        raise TypeError("보고서 아티팩트 경로가 저장되지 않았습니다")
+    report_path = Path(stored_path)
+    run_data_path = report_path.with_name("run-data.json")
+    if not report_path.is_file() or not run_data_path.is_file():
+        raise FileNotFoundError("저장된 보고서 아티팩트를 찾을 수 없습니다")
+    bundle = ReportBundle.model_validate_json(run_data_path.read_text(encoding="utf-8"))
+    if bundle.run.run_id != run.run_id:
+        raise ValueError("저장된 보고서 아티팩트의 실행 ID가 일치하지 않습니다")
+    return bundle, report_path.parent
+
+
+def _sheet_run_payload(run: RunRecord) -> dict[str, object]:
+    return {
+        "run_id": run.run_id,
+        "status": run.status.value,
+        "stage": run.current_stage.value if run.current_stage else "",
+        "completed_at": run.completed_at.isoformat() if run.completed_at else "",
+    }
+
+
+def _sheet_candidates(bundle: ReportBundle) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "candidate_id": candidate.candidate_id,
+            "complex_name": candidate.listing.complex_name,
+            "address": candidate.listing.address,
+            "asking_price": candidate.listing.asking_price,
+            "status": candidate.listing.status,
+            "total_score": candidate.assessment.total_score,
+            "confidence": candidate.assessment.confidence,
+            "recommendable": candidate.assessment.recommendable,
+            "scenario": candidate.scenario.value if candidate.scenario else "",
+            "evidence_ids": ",".join(str(item) for item in candidate.evidence_ids),
+        }
+        for candidate in bundle.candidates
+    )
 
 
 def _upgrade_database(settings: Settings) -> None:
