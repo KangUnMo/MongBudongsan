@@ -9,6 +9,7 @@ from sqlalchemy import Engine, create_engine, inspect, text
 
 from mybudongsan.domain.requests import MoneyRange, RegionCriterion, SearchRequest
 from mybudongsan.domain.scoring import EvaluationInput, evaluate_listing
+from mybudongsan.notifications.outbox import NotificationOutbox
 from mybudongsan.research.contracts import ListingObservation
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.models import EvidenceModel, ListingModel
@@ -336,6 +337,101 @@ def test_notification_outbox_migration_replaces_legacy_sent_only_shape(
             )
         ).scalar_one() is None
     engine.dispose()
+
+
+def test_claim_token_migration_recovers_existing_dispatching_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alembic_config, database_url = _migration_config(
+        tmp_path,
+        monkeypatch,
+        "notification-claim-recovery",
+    )
+    command.upgrade(alembic_config, "0004")
+    engine = create_engine(database_url)
+    created_at = "2026-09-23 08:00:00.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO search_requests (request_id, version, payload, created_at) "
+                "VALUES ('recovery-request', 1, '{}', :created_at)"
+            ),
+            {"created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO research_runs "
+                "(run_id, request_id, request_version, status, current_stage, "
+                "checkpoint_payload, error_message, started_at, completed_at) "
+                "VALUES ('recovery-run', 'recovery-request', 1, 'completed', "
+                "'sync_complete', '{}', NULL, :created_at, :created_at)"
+            ),
+            {"created_at": created_at},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO notification_events "
+                "(run_id, event_type, channel, payload, status, attempt_count, "
+                "last_error, provider_message_id, created_at, sent_at) VALUES "
+                "('recovery-run', 'work_started', 'kakao', :first_payload, "
+                "'dispatching', 1, NULL, NULL, :created_at, NULL), "
+                "('recovery-run', 'researcher_assigned', 'kakao', :second_payload, "
+                "'dispatching', 2, NULL, NULL, :created_at, NULL), "
+                "('recovery-run', 'specialist_assigned', 'kakao', '{}', "
+                "'pending', 0, NULL, NULL, :created_at, NULL), "
+                "('recovery-run', 'finalizing', 'kakao', '{}', "
+                "'failed', 1, 'safe timeout', NULL, :created_at, NULL), "
+                "('recovery-run', 'completed', 'kakao', '{}', "
+                "'sent', 1, NULL, 'provider_acknowledged', :created_at, :created_at)"
+            ),
+            {
+                "created_at": created_at,
+                "first_payload": json.dumps({"message": "first"}),
+                "second_payload": json.dumps({"message": "second"}),
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(alembic_config, "head")
+    database = Database(database_url)
+    outbox = NotificationOutbox(database)
+    dispatching = outbox.status("recovery-run", state="dispatching", channel="kakao")
+
+    assert [record.attempt_count for record in dispatching] == [1, 2]
+    assert [record.payload for record in dispatching] == [
+        {"message": "first"},
+        {"message": "second"},
+    ]
+    tokens = [record.claim_token for record in dispatching]
+    assert all(tokens)
+    assert len(set(tokens)) == 2
+    with database.engine.connect() as connection:
+        nullable_states = connection.execute(
+            text(
+                "SELECT status, claim_token FROM notification_events "
+                "WHERE status IN ('pending', 'failed', 'sent') ORDER BY status"
+            )
+        ).all()
+    assert all(claim_token is None for _, claim_token in nullable_states)
+
+    with pytest.raises(ValueError, match="stale"):
+        outbox.mark_sent(
+            dispatching[0].event_id,
+            "wrong-attempt",
+            claim_token="not-the-recovery-token",
+        )
+    sent = outbox.mark_sent(
+        dispatching[0].event_id,
+        "recovered-provider-id",
+        claim_token=dispatching[0].claim_token or "",
+    )
+    failed = outbox.mark_failed(
+        dispatching[1].event_id,
+        "confirmed not delivered",
+        claim_token=dispatching[1].claim_token or "",
+    )
+    assert sent.status == "sent"
+    assert failed.status == "failed"
 
 
 def _migration_config(
