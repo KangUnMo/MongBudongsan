@@ -94,11 +94,19 @@ class ListingRepository:
         observations: tuple[ListingObservation, ...],
     ) -> tuple[ListingUpsertResult, ...]:
         with self._database.session() as session:
-            self._require_run(session, run_id)
-            return tuple(
-                self._upsert_observation(session, run_id, observation)
-                for observation in observations
-            )
+            return self.ingest_bundle_in_session(session, run_id, observations)
+
+    def ingest_bundle_in_session(
+        self,
+        session: Session,
+        run_id: str,
+        observations: tuple[ListingObservation, ...],
+    ) -> tuple[ListingUpsertResult, ...]:
+        self._require_run(session, run_id)
+        return tuple(
+            self._upsert_observation(session, run_id, observation)
+            for observation in observations
+        )
 
     @staticmethod
     def _require_run(session: Session, run_id: str) -> None:
@@ -144,6 +152,7 @@ class ListingRepository:
         session.add(
             ListingSnapshotModel(
                 listing_id=listing.id,
+                run_id=run_id,
                 asking_price=observation.asking_price,
                 status=observation.status,
                 payload={
@@ -249,27 +258,35 @@ class EvidenceRepository:
         evidence: tuple[EvidenceObservation, ...],
     ) -> tuple[PersistedEvidence, ...]:
         with self._database.session() as session:
-            ListingRepository._require_run(session, run_id)
-            stored: list[PersistedEvidence] = []
-            for item in evidence:
-                model = EvidenceModel(
-                    run_id=run_id,
-                    listing_id=None,
-                    claim=item.claim,
-                    source_url=item.source_url,
-                    source_type=item.source_type,
-                    excerpt=item.excerpt,
-                    accessed_at=item.accessed_at,
+            return self.save_for_run_in_session(session, run_id, evidence)
+
+    @staticmethod
+    def save_for_run_in_session(
+        session: Session,
+        run_id: str,
+        evidence: tuple[EvidenceObservation, ...],
+    ) -> tuple[PersistedEvidence, ...]:
+        ListingRepository._require_run(session, run_id)
+        stored: list[PersistedEvidence] = []
+        for item in evidence:
+            model = EvidenceModel(
+                run_id=run_id,
+                listing_id=None,
+                claim=item.claim,
+                source_url=item.source_url,
+                source_type=item.source_type,
+                excerpt=item.excerpt,
+                accessed_at=item.accessed_at,
+            )
+            session.add(model)
+            session.flush()
+            stored.append(
+                PersistedEvidence(
+                    local_evidence_id=item.evidence_id,
+                    evidence_id=model.id,
                 )
-                session.add(model)
-                session.flush()
-                stored.append(
-                    PersistedEvidence(
-                        local_evidence_id=item.evidence_id,
-                        evidence_id=model.id,
-                    )
-                )
-            return tuple(stored)
+            )
+        return tuple(stored)
 
     def list_for_run(
         self,
@@ -324,27 +341,39 @@ class AssessmentRepository:
         run_id: str,
         listing_id: int,
         evaluation_input: EvaluationInput,
+        session: Session | None = None,
     ) -> AssessmentRecord:
-        with self._database.session() as session:
-            ListingRepository._require_run(session, run_id)
-            self._require_listing(session, listing_id)
-            canonical_input = EvaluationInput.model_validate(evaluation_input.model_dump(mode="json"))
-            self._validate_evidence_ownership(session, run_id, listing_id, canonical_input)
-            result = evaluate_listing(canonical_input)
-            assessment = AssessmentModel(
-                run_id=run_id,
-                listing_id=listing_id,
-                passed_gates=result.eligible,
-                score=(Decimal(str(result.total_score)) if result.total_score is not None else None),
-                risks={"reasons": list(result.reasons)},
-                rationale="; ".join(result.reasons) or None,
-                input_payload=canonical_input.model_dump(mode="json"),
-                result_payload=result.model_dump(mode="json"),
-                created_at=datetime.now(UTC),
-            )
-            session.add(assessment)
-            session.flush()
-            return self._to_record(assessment)
+        if session is not None:
+            return self._save_in_session(session, run_id, listing_id, evaluation_input)
+        with self._database.session() as transaction:
+            return self._save_in_session(transaction, run_id, listing_id, evaluation_input)
+
+    def _save_in_session(
+        self,
+        session: Session,
+        run_id: str,
+        listing_id: int,
+        evaluation_input: EvaluationInput,
+    ) -> AssessmentRecord:
+        ListingRepository._require_run(session, run_id)
+        self._require_listing(session, listing_id)
+        canonical_input = EvaluationInput.model_validate(evaluation_input.model_dump(mode="json"))
+        self._validate_evidence_ownership(session, run_id, listing_id, canonical_input)
+        result = evaluate_listing(canonical_input)
+        assessment = AssessmentModel(
+            run_id=run_id,
+            listing_id=listing_id,
+            passed_gates=result.eligible,
+            score=(Decimal(str(result.total_score)) if result.total_score is not None else None),
+            risks={"reasons": list(result.reasons)},
+            rationale="; ".join(result.reasons) or None,
+            input_payload=canonical_input.model_dump(mode="json"),
+            result_payload=result.model_dump(mode="json"),
+            created_at=datetime.now(UTC),
+        )
+        session.add(assessment)
+        session.flush()
+        return self._to_record(assessment)
 
     def get(self, run_id: str, listing_id: int) -> AssessmentRecord:
         with self._database.session() as session:
@@ -380,7 +409,7 @@ class AssessmentRepository:
                     select(ListingSnapshotModel)
                     .where(
                         ListingSnapshotModel.listing_id == assessment.listing_id,
-                        ListingSnapshotModel.observed_at <= assessment.created_at,
+                        ListingSnapshotModel.run_id == run_id,
                     )
                     .order_by(
                         desc(ListingSnapshotModel.observed_at),
@@ -460,18 +489,27 @@ class ReportRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
 
-    def save_markdown(self, run_id: str, content: str) -> None:
-        with self._database.session() as session:
-            ListingRepository._require_run(session, run_id)
-            session.add(
-                ReportModel(
-                    run_id=run_id,
-                    format="markdown",
-                    content=content,
-                    drive_file_id=None,
-                    created_at=datetime.now(UTC),
-                )
+    def save_markdown(
+        self, run_id: str, content: str, *, session: Session | None = None
+    ) -> None:
+        if session is not None:
+            self._save_markdown_in_session(session, run_id, content)
+            return
+        with self._database.session() as transaction:
+            self._save_markdown_in_session(transaction, run_id, content)
+
+    @staticmethod
+    def _save_markdown_in_session(session: Session, run_id: str, content: str) -> None:
+        ListingRepository._require_run(session, run_id)
+        session.add(
+            ReportModel(
+                run_id=run_id,
+                format="markdown",
+                content=content,
+                drive_file_id=None,
+                created_at=datetime.now(UTC),
             )
+        )
 
 
 @dataclass(frozen=True)
@@ -527,12 +565,18 @@ class RunRepository:
             session.flush()
             return self._to_record(run)
 
-    def get(self, run_id: str) -> RunRecord:
-        with self._database.session() as session:
-            run = session.scalar(select(ResearchRunModel).where(ResearchRunModel.run_id == run_id))
-            if run is None:
-                raise ValueError(f"run not found: {run_id}")
-            return self._to_record(run)
+    def get(self, run_id: str, *, session: Session | None = None) -> RunRecord:
+        if session is not None:
+            return self._get_in_session(session, run_id)
+        with self._database.session() as transaction:
+            return self._get_in_session(transaction, run_id)
+
+    @staticmethod
+    def _get_in_session(session: Session, run_id: str) -> RunRecord:
+        run = session.scalar(select(ResearchRunModel).where(ResearchRunModel.run_id == run_id))
+        if run is None:
+            raise ValueError(f"run not found: {run_id}")
+        return RunRepository._to_record(run)
 
     def advance(
         self,
@@ -540,36 +584,48 @@ class RunRepository:
         run_id: str,
         stage: RunStage,
         checkpoint: dict[str, object],
+        session: Session | None = None,
     ) -> RunRecord:
         """Atomically persist the next completed stage or return its prior checkpoint."""
-        with self._database.session() as session:
-            run = session.scalar(select(ResearchRunModel).where(ResearchRunModel.run_id == run_id))
-            if run is None:
-                raise ValueError(f"run not found: {run_id}")
-            history = self._history(run)
-            if stage in history:
-                return self._to_record(run, checkpoint_stage=stage)
-            if run.current_stage is None:
-                raise InvalidTransition("run has not completed request approval")
-            validate_transition(RunStage(run.current_stage), stage)
+        if session is not None:
+            return self._advance_in_session(session, run_id, stage, checkpoint)
+        with self._database.session() as transaction:
+            return self._advance_in_session(transaction, run_id, stage, checkpoint)
 
-            completed_at = datetime.now(UTC)
-            history[stage] = StageCheckpoint(
-                checkpoint=dict(checkpoint),
-                completed_at=completed_at,
-                idempotency_key=f"{run_id}:{stage.value}",
-            )
-            run.current_stage = stage.value
-            run.status = (
-                RunStatus.COMPLETED.value
-                if stage is RunStage.SYNC_COMPLETE
-                else RunStatus.RUNNING.value
-            )
-            run.checkpoint_payload = self._serialize_history(history)
-            run.error_message = None
-            run.completed_at = completed_at
-            session.flush()
-            return self._to_record(run)
+    def _advance_in_session(
+        self,
+        session: Session,
+        run_id: str,
+        stage: RunStage,
+        checkpoint: dict[str, object],
+    ) -> RunRecord:
+        run = session.scalar(select(ResearchRunModel).where(ResearchRunModel.run_id == run_id))
+        if run is None:
+            raise ValueError(f"run not found: {run_id}")
+        history = self._history(run)
+        if stage in history:
+            return self._to_record(run, checkpoint_stage=stage)
+        if run.current_stage is None:
+            raise InvalidTransition("run has not completed request approval")
+        validate_transition(RunStage(run.current_stage), stage)
+
+        completed_at = datetime.now(UTC)
+        history[stage] = StageCheckpoint(
+            checkpoint=dict(checkpoint),
+            completed_at=completed_at,
+            idempotency_key=f"{run_id}:{stage.value}",
+        )
+        run.current_stage = stage.value
+        run.status = (
+            RunStatus.COMPLETED.value
+            if stage is RunStage.SYNC_COMPLETE
+            else RunStatus.RUNNING.value
+        )
+        run.checkpoint_payload = self._serialize_history(history)
+        run.error_message = None
+        run.completed_at = completed_at
+        session.flush()
+        return self._to_record(run)
 
     def mark_resumable(self, run_id: str, message: str) -> RunRecord:
         with self._database.session() as session:

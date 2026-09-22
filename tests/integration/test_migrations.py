@@ -165,6 +165,39 @@ def test_assessment_payload_upgrade_path_preserves_0001_then_adds_json_contract(
     engine.dispose()
 
 
+def test_listing_snapshot_run_ownership_migration_upgrades_and_downgrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    database_path = tmp_path / "snapshot-ownership.sqlite3"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    monkeypatch.setenv("MYBUDONGSAN_DB_URL", database_url)
+    alembic_config = Config(str(project_root / "alembic.ini"))
+    alembic_config.set_main_option("script_location", str(project_root / "migrations"))
+    alembic_config.set_main_option("sqlalchemy.url", database_url)
+
+    command.upgrade(alembic_config, "0002")
+    engine = create_engine(database_url)
+    assert "run_id" not in {column["name"] for column in inspect(engine).get_columns("listing_snapshots")}
+    engine.dispose()
+
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(database_url)
+    columns = {column["name"]: column for column in inspect(engine).get_columns("listing_snapshots")}
+    assert columns["run_id"]["nullable"] is True
+    assert "run_id" in {
+        indexed_column
+        for index in inspect(engine).get_indexes("listing_snapshots")
+        for indexed_column in index["column_names"]
+    }
+    engine.dispose()
+
+    command.downgrade(alembic_config, "0002")
+    engine = create_engine(database_url)
+    assert "run_id" not in {column["name"] for column in inspect(engine).get_columns("listing_snapshots")}
+    engine.dispose()
+
+
 def _seed_legacy_assessment(engine: Engine) -> int:
     created_at = "2026-09-21 00:00:00.000000"
     connection = engine.connect()

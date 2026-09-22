@@ -77,6 +77,9 @@ class ListingSnapshotModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"))
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_runs.run_id"), index=True
+    )
     asking_price: Mapped[Decimal | None] = mapped_column(Numeric)
     status: Mapped[str | None] = mapped_column(String(64))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)

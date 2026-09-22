@@ -17,9 +17,10 @@ from mybudongsan.storage.models import (
     AssessmentModel,
     EvidenceModel,
     ListingModel,
+    ListingSnapshotModel,
     ReportModel,
 )
-from mybudongsan.storage.repositories import ReportRepository, RunRepository
+from mybudongsan.storage.repositories import AssessmentRepository, ReportRepository, RunRepository
 
 runner = CliRunner()
 
@@ -249,33 +250,42 @@ def test_report_failure_does_not_mark_the_run_complete(
     failure_point: str,
 ) -> None:
     data_dir, run_id = _prepare_ingested_run(tmp_path)
+    artifacts = tmp_path / "artifacts"
 
     def fail(*args: object, **kwargs: object) -> None:
         raise RuntimeError(f"forced {failure_point} failure")
 
-    if failure_point == "render":
-        monkeypatch.setattr(ReportRenderer, "render", fail)
-    else:
-        monkeypatch.setattr(ReportRepository, "save_markdown", fail)
+    with monkeypatch.context() as patch:
+        if failure_point == "render":
+            patch.setattr(ReportRenderer, "render", fail)
+        else:
+            patch.setattr(ReportRepository, "save_markdown", fail)
 
-    result = runner.invoke(
-        app,
-        [
-            "--data-dir",
-            str(data_dir),
-            "run",
-            "report",
-            run_id,
-            "--output",
-            str(tmp_path / "artifacts"),
-        ],
-    )
+        result = runner.invoke(
+            app,
+            [
+                "--data-dir",
+                str(data_dir),
+                "run",
+                "report",
+                run_id,
+                "--output",
+                str(artifacts),
+            ],
+        )
 
     database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
     assert result.exit_code != 0
+    assert not list(artifacts.rglob("report.md"))
     assert RunRepository(database).get(run_id).current_stage is RunStage.DEEP_RESEARCH_COMPLETE
     with database.session() as session:
         assert session.scalar(select(func.count()).select_from(ReportModel)) == 0
+
+    retry = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "report", run_id, "--output", str(artifacts)],
+    )
+    assert retry.exit_code == 0, retry.output
 
 
 def test_run_ingest_accepts_a_bundle_with_no_deep_assessments(tmp_path: Path) -> None:
@@ -301,6 +311,116 @@ def test_run_ingest_accepts_a_bundle_with_no_deep_assessments(tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert "discovered=1 verified=0 deep=0" in result.output
+
+
+def test_run_ingest_rolls_back_evidence_listings_assessments_and_checkpoints_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, run_id = _prepare_started_run(tmp_path)
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "research_bundle.json"
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("forced assessment failure")
+
+    monkeypatch.setattr(AssessmentRepository, "save", fail)
+    result = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "ingest", run_id, str(fixture_path)],
+    )
+
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert result.exit_code != 0
+    assert RunRepository(database).get(run_id).current_stage is RunStage.REQUEST_APPROVED
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(EvidenceModel)) == 0
+        assert session.scalar(select(func.count()).select_from(ListingModel)) == 0
+        assert session.scalar(select(func.count()).select_from(ListingSnapshotModel)) == 0
+        assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 0
+
+
+def test_run_ingest_retries_an_identical_bundle_without_duplicates_and_rejects_a_conflict(
+    tmp_path: Path,
+) -> None:
+    data_dir, run_id = _prepare_started_run(tmp_path)
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "research_bundle.json"
+    command = ["--data-dir", str(data_dir), "run", "ingest", run_id, str(fixture_path)]
+    assert runner.invoke(app, command).exit_code == 0
+
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    with database.session() as session:
+        original_counts = (
+            session.scalar(select(func.count()).select_from(EvidenceModel)),
+            session.scalar(select(func.count()).select_from(ListingModel)),
+            session.scalar(select(func.count()).select_from(ListingSnapshotModel)),
+            session.scalar(select(func.count()).select_from(AssessmentModel)),
+        )
+
+    identical_retry = runner.invoke(app, command)
+    assert identical_retry.exit_code == 0
+    with database.session() as session:
+        assert original_counts == (
+            session.scalar(select(func.count()).select_from(EvidenceModel)),
+            session.scalar(select(func.count()).select_from(ListingModel)),
+            session.scalar(select(func.count()).select_from(ListingSnapshotModel)),
+            session.scalar(select(func.count()).select_from(AssessmentModel)),
+        )
+
+    conflicting_bundle = json.loads(fixture_path.read_text(encoding="utf-8"))
+    conflicting_bundle["discovered"][0]["asking_price"] = 1
+    conflicting_path = tmp_path / "conflicting-bundle.json"
+    conflicting_path.write_text(json.dumps(conflicting_bundle), encoding="utf-8")
+    conflict = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "ingest", run_id, str(conflicting_path)],
+    )
+    assert conflict.exit_code != 0
+    assert "다른 조사 결과" in conflict.output
+    with database.session() as session:
+        assert original_counts == (
+            session.scalar(select(func.count()).select_from(EvidenceModel)),
+            session.scalar(select(func.count()).select_from(ListingModel)),
+            session.scalar(select(func.count()).select_from(ListingSnapshotModel)),
+            session.scalar(select(func.count()).select_from(AssessmentModel)),
+        )
+
+
+def test_run_report_rolls_back_database_and_artifact_on_checkpoint_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    artifacts = tmp_path / "artifacts"
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("forced report checkpoint failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RunRepository, "advance", fail)
+        failed = runner.invoke(
+            app,
+            [
+                "--data-dir",
+                str(data_dir),
+                "run",
+                "report",
+                run_id,
+                "--output",
+                str(artifacts),
+            ],
+        )
+
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert failed.exit_code != 0
+    assert not list(artifacts.rglob("report.md"))
+    assert RunRepository(database).get(run_id).current_stage is RunStage.DEEP_RESEARCH_COMPLETE
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ReportModel)) == 0
+
+    retry = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "report", run_id, "--output", str(artifacts)],
+    )
+    assert retry.exit_code == 0, retry.output
+    assert Path(_field(retry.output, "report_path")).is_file()
 
 
 def _prepare_ingested_run(tmp_path: Path) -> tuple[Path, str]:

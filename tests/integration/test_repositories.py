@@ -193,13 +193,13 @@ def test_report_projection_reads_latest_listing_and_only_run_owned_evidence(data
         source="fixture",
         source_listing_id="projection-1",
         asking_price=700_000_000,
-        observed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        observed_at=datetime(2020, 9, 21, 10, tzinfo=UTC),
         raw_evidence_ids=(evidence_id,),
     )
     latest = first.model_copy(
         update={
             "asking_price": Decimal(680_000_000),
-            "observed_at": datetime(2026, 9, 22, tzinfo=UTC),
+            "observed_at": datetime(2020, 9, 21, 11, tzinfo=UTC),
         }
     )
     listing_id = listing_repository.ingest_bundle("run-projection", (first,))[0].listing_id
@@ -219,7 +219,7 @@ def test_report_projection_reads_latest_listing_and_only_run_owned_evidence(data
     later_run_snapshot = latest.model_copy(
         update={
             "asking_price": Decimal(650_000_000),
-            "observed_at": datetime(2026, 9, 23, tzinfo=UTC),
+            "observed_at": datetime(2020, 9, 21, 12, tzinfo=UTC),
             "raw_evidence_ids": (),
         }
     )

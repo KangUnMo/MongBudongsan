@@ -21,27 +21,21 @@ from mybudongsan.config import Settings
 from mybudongsan.domain.requests import SearchRequest
 from mybudongsan.domain.runs import RunStage
 from mybudongsan.domain.scoring import DIMENSIONS, DimensionEvidence
+from mybudongsan.reports.publication import ReportPublicationService
 from mybudongsan.reports.renderer import (
     AssessedCandidate,
     ReportBundle,
-    ReportRenderer,
     ReportRunSummary,
 )
 from mybudongsan.reports.renderer import (
     EvidenceRecord as ReportEvidenceRecord,
 )
-from mybudongsan.research.contracts import (
-    DeepAssessmentObservation,
-    ListingObservation,
-    ResearchBundle,
-)
-from mybudongsan.research.ingest import ListingIngestService
+from mybudongsan.research.contracts import ListingObservation, ResearchBundle
+from mybudongsan.research.ingest import ResearchBundleIngestService
 from mybudongsan.storage.database import Database
 from mybudongsan.storage.repositories import (
     AssessmentRepository,
     EvidenceRepository,
-    ListingRepository,
-    ReportRepository,
     RequestRepository,
     RunRepository,
 )
@@ -173,44 +167,7 @@ def run_ingest(context: typer.Context, run_id: str, bundle_path: Path) -> None:
     def operation() -> None:
         bundle = ResearchBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
         database = _database(context)
-        run_service = _run_service(database)
-        persisted_bundle = _persist_evidence(database, run_id, bundle)
-        summary = ListingIngestService(ListingRepository(database)).ingest(
-            run_id, persisted_bundle
-        )
-        deep_count = len(persisted_bundle.deep_assessments)
-        deep_results = summary.results[-deep_count:] if deep_count else ()
-        assessment_repository = AssessmentRepository(database)
-        for deep_assessment, listing_result in zip(
-            persisted_bundle.deep_assessments,
-            deep_results,
-            strict=True,
-        ):
-            assessment_repository.save(
-                run_id=run_id,
-                listing_id=listing_result.listing_id,
-                evaluation_input=deep_assessment.evaluation_input,
-            )
-        run_service.advance(
-            run_id,
-            RunStage.DISCOVERY_COMPLETE,
-            {"discovered_count": len(bundle.discovered), "created": summary.created},
-        )
-        run_service.advance(
-            run_id,
-            RunStage.FILTER_COMPLETE,
-            {"candidate_count": len(bundle.verified)},
-        )
-        run_service.advance(
-            run_id,
-            RunStage.VERIFICATION_COMPLETE,
-            {"verified_count": len(bundle.verified)},
-        )
-        run_service.advance(
-            run_id,
-            RunStage.DEEP_RESEARCH_COMPLETE,
-            {"deep_assessment_count": len(bundle.deep_assessments)},
-        )
+        summary = ResearchBundleIngestService(database).ingest(run_id, bundle)
         typer.echo(
             f"discovered={len(bundle.discovered)} verified={len(bundle.verified)} "
             f"deep={len(bundle.deep_assessments)} created={summary.created} updated={summary.updated}"
@@ -291,16 +248,7 @@ def run_report(
             candidates=candidates,
             evidence=evidence,
         )
-        artifacts = ReportRenderer().render(bundle, output_root)
-        ReportRepository(database).save_markdown(
-            run_id,
-            artifacts.report_path.read_text(encoding="utf-8"),
-        )
-        run_service.advance(
-            run_id,
-            RunStage.REPORT_COMPLETE,
-            {"report_path": str(artifacts.report_path)},
-        )
+        artifacts = ReportPublicationService(database).publish(run_id, bundle, output_root)
         typer.echo(f"report_path={artifacts.report_path.resolve()}")
 
     _run(context, operation)
@@ -353,59 +301,6 @@ def _read_observation(path: Path) -> ListingObservation | None:
     if payload is None:
         return None
     return ListingObservation.model_validate(payload)
-
-
-def _persist_evidence(
-    database: Database,
-    run_id: str,
-    bundle: ResearchBundle,
-) -> ResearchBundle:
-    evidence = tuple(
-        item
-        for assessment in bundle.deep_assessments
-        for item in assessment.evidence
-    )
-    persisted = EvidenceRepository(database).save_for_run(run_id, evidence)
-    evidence_id_map = {
-        item.local_evidence_id: item.evidence_id for item in persisted
-    }
-    deep_assessments = tuple(
-        _remap_deep_assessment(assessment, evidence_id_map)
-        for assessment in bundle.deep_assessments
-    )
-    return bundle.model_copy(update={"deep_assessments": deep_assessments})
-
-
-def _remap_deep_assessment(
-    assessment: DeepAssessmentObservation,
-    evidence_id_map: dict[int, int],
-) -> DeepAssessmentObservation:
-    remapped_dimensions = DimensionEvidence(
-        **{
-            dimension: tuple(
-                evidence_id_map[evidence_id]
-                for evidence_id in getattr(
-                    assessment.evaluation_input.evidence_ids_by_dimension,
-                    dimension,
-                )
-            )
-            for dimension in DIMENSIONS
-        }
-    )
-    evaluation_input = assessment.evaluation_input.model_copy(
-        update={"evidence_ids_by_dimension": remapped_dimensions}
-    )
-    listing = assessment.listing.model_copy(
-        update={
-            "raw_evidence_ids": tuple(
-                evidence_id_map[evidence_id]
-                for evidence_id in assessment.listing.raw_evidence_ids
-            )
-        }
-    )
-    return assessment.model_copy(
-        update={"listing": listing, "evaluation_input": evaluation_input}
-    )
 
 
 def _evaluation_evidence_ids(evidence: DimensionEvidence) -> tuple[int, ...]:
