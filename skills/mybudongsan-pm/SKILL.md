@@ -35,7 +35,17 @@ specialist is permitted only for one material, unresolved question that changes 
 shortlisted candidate or report claim; send the exact question and relevant evidence.
 Never dispatch three specialists, parallel specialty teams, or a replacement full search.
 
-The research bounds are: `discovered: 25`, `verified: 7`, and `deep assessments: 3`.
+**Hard stop — multiple specialists:** If a request names market, transit, and urban-planning
+specialists together, dispatch none of them. Do not relabel them as “researchers” or
+“read-only investigators.” Urgency never changes this. Dispatch one integrated researcher
+first; only after its bundle identifies one material unresolved question may one specialist be
+assigned. The required response is: “I will not dispatch those specialists together; I will
+dispatch one integrated researcher.”
+
+Discovery must target 15–25 when evidence exists, with a hard cap of 25. If fewer than
+15 lawful, evidence-backed candidates exist, report the actual count and shortage reason;
+do not invent listings or relax criteria. The other bounds are `verified: 7` and `deep
+assessments: 3`.
 A search result is not an active listing until its individual listing page is checked.
 Filter against the approved criteria deterministically; candidates failing a mandatory
 criterion are `exclude`, not a reason to weaken it. Recommendation confidence must be
@@ -60,8 +70,8 @@ Read the role and report contracts before dispatching:
 ## Lifecycle delivery
 
 Use a maximum of five lifecycle event types for a run: `WORK_STARTED`,
-`RESEARCHER_ASSIGNED`, optional `SPECIALIST_ASSIGNED`, `FINALIZING` (or a single
-needs-action event when blocked), and terminal `COMPLETED` or `FAILED`. Do not add
+`RESEARCHER_ASSIGNED`, optional `SPECIALIST_ASSIGNED`, `FINALIZING` (or one
+`NEEDS_ACTION` event when blocked), and terminal `COMPLETED` or `FAILED`. Do not add
 progress chatter as lifecycle events.
 
 For a pending Kakao event, claim it in SQLite first:
@@ -79,16 +89,22 @@ uv run mybudongsan notify ack EVENT_ID --provider-id PROVIDER_ID --claim-token C
 For Gmail terminal events, use the terminal Gmail adapter only after `notify pending
 RUN_ID --channel gmail`; it follows the same token-bound acknowledgement rule.
 
-If a provider call times out or delivery is uncertain, do not send again, do not use an
-alternate PlayMCP tool, and never blind ack or retry. Reconcile first with the read-only
-command below, confirming the same event and token; only a provider receipt permits ack,
-and only confirmed non-delivery permits `notify fail` with the same token.
+If a provider call times out or delivery is uncertain, do not send again and never use an
+alternate provider or PlayMCP tool. A timeout is `unknown`, not a success or failure. Never
+blind ack or retry: `notify ack` has no `--status` option, so do not invent one. Reconcile
+first with the read-only command below, confirming the same event and token; only a provider
+receipt permits ack, and only confirmed non-delivery permits `notify fail` with the same token.
+
+`notify ack` requires both `--provider-id` and `--claim-token`. Do not use `mybudongsan notify ack EVENT_ID --claim-token CLAIM_TOKEN`; it is invalid and cannot prove delivery. Use only the exact acknowledgement command already shown above after a matching provider receipt.
 
 ```bash
 uv run mybudongsan notify status RUN_ID --state dispatching --channel kakao
 uv run mybudongsan notify fail EVENT_ID --error "confirmed not delivered" --claim-token CLAIM_TOKEN
 ```
 
-If reconciliation cannot prove delivery or non-delivery, leave it for manual recovery and
-do not advance a success-dependent stage. Never expose message bodies, credentials, or
-claim tokens in the user report.
+If reconciliation cannot prove delivery or non-delivery, leave the claimed event `dispatching`
+for manual recovery and do not advance a success-dependent stage. If confirmed non-delivery
+is failed, run `notify fail` with the current token. After `notify fail`, stop that recovery turn; do not send. A later `notify pending` issues a new claim token before any
+fresh send. It may use only `PlayMCP:MemoChat`. If that tool is unavailable, stop Kakao
+delivery and request setup. Never expose message bodies, credentials, or claim tokens in the
+user report.

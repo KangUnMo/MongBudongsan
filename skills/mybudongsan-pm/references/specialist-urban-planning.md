@@ -16,5 +16,6 @@ confidence, limitations, and unsupported claims. Label plans exactly `확정`, `
 
 ## Never do
 
-Do not communicate conclusions to the user, change criteria, create certainty from a blog,
-verify new listings, dispatch agents, call PlayMCP, or answer beyond the PM question.
+Do not communicate conclusions to the user, auto-relax criteria, change criteria, create
+certainty from a blog, verify new listings, dispatch agents, call PlayMCP, or answer beyond the
+PM question.

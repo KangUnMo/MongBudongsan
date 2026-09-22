@@ -16,5 +16,6 @@ limitations, and unsupported claims. State uncertainty rather than estimating a 
 
 ## Never do
 
-Do not communicate with the user, change criteria, mark listings active, make a final
-recommendation, dispatch agents, call PlayMCP, or answer beyond the exact PM question.
+Do not communicate conclusions to the user, auto-relax criteria, change criteria, mark listings
+active, make a final recommendation, dispatch agents, call PlayMCP, or answer beyond the exact
+PM question.

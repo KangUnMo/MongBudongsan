@@ -15,5 +15,6 @@ unsupported claims. Preserve the mandatory commute limit exactly.
 
 ## Never do
 
-Do not communicate conclusions to the user, alter commute criteria, promote a weak plan,
-verify a new listing, dispatch agents, call PlayMCP, or answer beyond the PM question.
+Do not communicate conclusions to the user, auto-relax criteria, alter commute criteria,
+promote a weak plan, verify a new listing, dispatch agents, call PlayMCP, or answer beyond the
+PM question.
