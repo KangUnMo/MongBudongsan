@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from secrets import token_urlsafe
 from types import MappingProxyType
+from typing import Any
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
 from mybudongsan.domain.listings import (
@@ -850,6 +852,8 @@ class RunRepository:
         run = session.scalar(select(ResearchRunModel).where(ResearchRunModel.run_id == run_id))
         if run is None:
             raise ValueError(f"run not found: {run_id}")
+        if run.status == RunStatus.CANCELLED.value:
+            raise InvalidTransition("cancelled runs cannot advance")
         history = self._history(run)
         if stage in history:
             return self._to_record(run, checkpoint_stage=stage)
@@ -882,10 +886,74 @@ class RunRepository:
                 raise ValueError(f"run not found: {run_id}")
             if run.status == RunStatus.COMPLETED.value:
                 raise InvalidTransition("completed runs cannot become resumable")
+            if run.status == RunStatus.CANCELLED.value:
+                raise InvalidTransition("cancelled runs cannot become resumable")
             run.status = RunStatus.RESUMABLE.value
             run.error_message = message
             session.flush()
             return self._to_record(run)
+
+    def cancel(self, run_id: str) -> RunRecord:
+        with self._database.session() as session:
+            run = session.scalar(
+                select(ResearchRunModel).where(ResearchRunModel.run_id == run_id)
+            )
+            if run is None:
+                raise ValueError(f"run not found: {run_id}")
+            if run.status == RunStatus.COMPLETED.value:
+                raise InvalidTransition("completed runs cannot be cancelled")
+            run.status = RunStatus.CANCELLED.value
+            run.error_message = "cancelled by user"
+            run.completed_at = datetime.now(UTC)
+            session.flush()
+            return self._to_record(run)
+
+    def owned_counts(self, run_id: str) -> dict[str, int]:
+        with self._database.session() as session:
+            self._get_in_session(session, run_id)
+            return {
+                "listing_snapshots": self._count_owned(session, ListingSnapshotModel, run_id),
+                "evidence": self._count_owned(session, EvidenceModel, run_id),
+                "assessments": self._count_owned(session, AssessmentModel, run_id),
+                "reports": self._count_owned(session, ReportModel, run_id),
+                "notification_events": self._count_owned(
+                    session, NotificationEventModel, run_id
+                ),
+                "research_runs": 1,
+            }
+
+    def delete_owned(self, run_id: str) -> dict[str, int]:
+        with self._database.session() as session:
+            self._get_in_session(session, run_id)
+            counts = {
+                "listing_snapshots": self._delete_owned(
+                    session, ListingSnapshotModel, run_id
+                ),
+                "evidence": self._delete_owned(session, EvidenceModel, run_id),
+                "assessments": self._delete_owned(session, AssessmentModel, run_id),
+                "reports": self._delete_owned(session, ReportModel, run_id),
+                "notification_events": self._delete_owned(
+                    session, NotificationEventModel, run_id
+                ),
+            }
+            session.execute(
+                sql_delete(ResearchRunModel).where(ResearchRunModel.run_id == run_id)
+            )
+            counts["research_runs"] = 1
+            return counts
+
+    @staticmethod
+    def _count_owned(session: Session, model: type[Any], run_id: str) -> int:
+        count = session.scalar(
+            select(func.count()).select_from(model).where(model.run_id == run_id)
+        )
+        return int(count or 0)
+
+    @staticmethod
+    def _delete_owned(session: Session, model: type[Any], run_id: str) -> int:
+        count = RunRepository._count_owned(session, model, run_id)
+        session.execute(sql_delete(model).where(model.run_id == run_id))
+        return count
 
     @staticmethod
     def _serialize_history(

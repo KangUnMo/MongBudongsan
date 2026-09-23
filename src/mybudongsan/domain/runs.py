@@ -21,6 +21,7 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     RESUMABLE = "resumable"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class InvalidTransition(ValueError):

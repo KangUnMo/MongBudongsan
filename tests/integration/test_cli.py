@@ -210,6 +210,40 @@ def test_cli_errors_are_korean_and_only_show_a_traceback_in_debug(tmp_path: Path
     assert "Traceback" in debug.output
 
 
+def test_run_inspect_outputs_the_canonical_run_as_json(tmp_path: Path) -> None:
+    data_dir, run_id = _prepare_started_run(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "inspect", run_id],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["run_id"] == run_id
+    assert payload["status"] == "running"
+    assert payload["current_stage"] == "request_approved"
+    assert payload["checkpoints"][0]["stage"] == "request_approved"
+
+
+def test_run_cancel_is_persisted_and_prevents_resume(tmp_path: Path) -> None:
+    data_dir, run_id = _prepare_started_run(tmp_path)
+
+    cancelled = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "cancel", run_id],
+    )
+    resumed = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "resume", run_id],
+    )
+
+    assert cancelled.exit_code == 0, cancelled.output
+    assert f"run_id={run_id} status=cancelled" in cancelled.output
+    assert resumed.exit_code != 0
+    assert "cancelled" in resumed.output
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -286,6 +320,197 @@ def test_report_failure_does_not_mark_the_run_complete(
         ["--data-dir", str(data_dir), "run", "report", run_id, "--output", str(artifacts)],
     )
     assert retry.exit_code == 0, retry.output
+
+
+def test_report_retry_reuses_the_published_artifacts_without_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    command = [
+        "--data-dir",
+        str(data_dir),
+        "run",
+        "report",
+        run_id,
+        "--output",
+        str(artifacts),
+    ]
+
+    first = runner.invoke(app, command)
+    retry = runner.invoke(app, command)
+
+    assert first.exit_code == 0, first.output
+    assert retry.exit_code == 0, retry.output
+    assert _field(retry.output, "report_path") == _field(first.output, "report_path")
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ReportModel)) == 1
+
+
+def test_run_delete_previews_then_requires_exact_confirmation_and_preserves_shared_data(
+    tmp_path: Path,
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "research_bundle.json"
+    second = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "start",
+            "req-failure",
+            "--version",
+            "1",
+            "--run-id",
+            "run-preserved",
+        ],
+    )
+    assert second.exit_code == 0, second.output
+    assert runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "ingest",
+            "run-preserved",
+            str(fixture_path),
+        ],
+    ).exit_code == 0
+    reported = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "report", run_id],
+    )
+    assert reported.exit_code == 0, reported.output
+    report_path = Path(_field(reported.output, "report_path"))
+
+    preview = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "delete", run_id],
+    )
+    refused = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "delete",
+            run_id,
+            "--execute",
+            "--confirm",
+            "wrong-run",
+        ],
+    )
+
+    assert preview.exit_code == 0, preview.output
+    assert "dry_run=true" in preview.output
+    assert str(report_path.parent) in preview.output
+    assert refused.exit_code != 0
+    assert report_path.is_file()
+
+    deleted = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "delete",
+            run_id,
+            "--execute",
+            "--confirm",
+            run_id,
+        ],
+    )
+
+    assert deleted.exit_code == 0, deleted.output
+    assert f"run_id={run_id} deleted=true" in deleted.output
+    assert not report_path.parent.exists()
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    with pytest.raises(ValueError, match="run not found"):
+        RunRepository(database).get(run_id)
+    assert RunRepository(database).get("run-preserved").run_id == "run-preserved"
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ListingModel)) == 25
+        assert session.scalar(select(func.count()).select_from(ListingSnapshotModel)) == 25
+
+
+def test_run_delete_refuses_artifacts_outside_the_managed_data_directory(
+    tmp_path: Path,
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    outside_root = tmp_path / "outside-artifacts"
+    reported = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "report",
+            run_id,
+            "--output",
+            str(outside_root),
+        ],
+    )
+    assert reported.exit_code == 0, reported.output
+    report_path = Path(_field(reported.output, "report_path"))
+
+    result = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "delete",
+            run_id,
+            "--execute",
+            "--confirm",
+            run_id,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "managed" in result.output.lower()
+    assert report_path.is_file()
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert RunRepository(database).get(run_id).run_id == run_id
+
+
+def test_run_delete_restores_the_artifact_directory_when_database_deletion_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    reported = runner.invoke(
+        app,
+        ["--data-dir", str(data_dir), "run", "report", run_id],
+    )
+    assert reported.exit_code == 0, reported.output
+    report_path = Path(_field(reported.output, "report_path"))
+
+    def fail_delete(*args: object, **kwargs: object) -> dict[str, int]:
+        del args, kwargs
+        raise RuntimeError("forced database deletion failure")
+
+    monkeypatch.setattr(RunRepository, "delete_owned", fail_delete)
+    result = runner.invoke(
+        app,
+        [
+            "--data-dir",
+            str(data_dir),
+            "run",
+            "delete",
+            run_id,
+            "--execute",
+            "--confirm",
+            run_id,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert report_path.is_file()
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert RunRepository(database).get(run_id).run_id == run_id
 
 
 def test_run_ingest_accepts_a_bundle_with_no_deep_assessments(tmp_path: Path) -> None:

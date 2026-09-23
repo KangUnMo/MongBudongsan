@@ -2,6 +2,13 @@
 
 개인용 아파트 매수 조사 결과를 로컬 SQLite와 Markdown/CSV/JSON 아티팩트에 남기는 CLI입니다. 이 버전은 단일 사용자용이며 서버, 데몬, 자동 스케줄러, 네트워크 수집 기능을 실행하지 않습니다.
 
+설치, OAuth/Keychain, PlayMCP `MemoChat`, 실행 복구, 알림 claim, 단일 run 안전
+삭제의 정확한 운영 절차는 [개인 운영 가이드](docs/operations.md)를 따르세요.
+
+오프라인 완료는 fixture 기반 로컬 workflow와 fake Google adapter 검증을 뜻합니다.
+실제 Google 행·Drive 파일·Gmail 및 PlayMCP 카카오 전달은 사용자가 테스트 리소스와
+권한을 명시적으로 승인한 뒤 별도의 live smoke와 PM 수동 확인으로만 검증합니다.
+
 ## 시작하기
 
 Python 3.12와 [uv](https://docs.astral.sh/uv/)가 필요합니다. 새 체크아웃에서 아래 명령을 순서대로 실행하면 외부 서비스나 자격 증명 없이 결정론적 fixture 흐름을 실행할 수 있습니다.

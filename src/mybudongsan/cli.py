@@ -45,7 +45,7 @@ from mybudongsan.storage.repositories import (
     RunRecord,
     RunRepository,
 )
-from mybudongsan.workflows.research_run import ResearchRunService
+from mybudongsan.workflows.research_run import ResearchRunService, RunDeletionService
 from mybudongsan.workflows.watch import WatchChangeDetector
 
 
@@ -359,6 +359,76 @@ def run_resume(context: typer.Context, run_id: str) -> None:
     _run(context, operation)
 
 
+@run_app.command("inspect")
+def run_inspect(context: typer.Context, run_id: str) -> None:
+    def operation() -> None:
+        run = RunRepository(_database(context)).get(run_id)
+        typer.echo(
+            json.dumps(
+                {
+                    "run_id": run.run_id,
+                    "request_id": run.request_id,
+                    "request_version": run.request_version,
+                    "status": run.status.value,
+                    "current_stage": run.current_stage.value if run.current_stage else None,
+                    "error_message": run.error_message,
+                    "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                    "checkpoints": [
+                        {
+                            "stage": stage.value,
+                            "completed_at": checkpoint.completed_at.isoformat(),
+                            "idempotency_key": checkpoint.idempotency_key,
+                            "checkpoint": checkpoint.checkpoint,
+                        }
+                        for stage, checkpoint in run.checkpoints.items()
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+
+    _run(context, operation)
+
+
+@run_app.command("cancel")
+def run_cancel(context: typer.Context, run_id: str) -> None:
+    def operation() -> None:
+        run = _run_service(_database(context)).cancel(run_id)
+        typer.echo(f"run_id={run.run_id} status={run.status.value}")
+
+    _run(context, operation)
+
+
+@run_app.command("delete")
+def run_delete(
+    context: typer.Context,
+    run_id: str,
+    execute: Annotated[bool, typer.Option(help="미리보기 후 실제 삭제 실행")] = False,
+    confirm: Annotated[
+        str | None,
+        typer.Option(help="--execute 시 정확한 run ID 확인값"),
+    ] = None,
+) -> None:
+    def operation() -> None:
+        service = RunDeletionService(
+            RunRepository(_database(context)),
+            _runtime(context).settings.data_dir / "artifacts",
+        )
+        preview = service.preview(run_id)
+        artifact = str(preview.artifact_directory) if preview.artifact_directory else "none"
+        if not execute:
+            typer.echo(
+                f"run_id={run_id} dry_run=true artifact_directory={artifact} "
+                f"row_counts={json.dumps(preview.row_counts, sort_keys=True)}"
+            )
+            return
+        service.delete(run_id, confirmation=confirm or "")
+        typer.echo(f"run_id={run_id} deleted=true artifact_directory={artifact}")
+
+    _run(context, operation)
+
+
 @run_app.command("report")
 def run_report(
     context: typer.Context,
@@ -371,7 +441,11 @@ def run_report(
         run_repository = RunRepository(database)
         run_service = _run_service(database)
         run = run_repository.get(run_id)
-        if run_service.resume(run_id).next_stage is not RunStage.REPORT_COMPLETE:
+        report_exists = RunStage.REPORT_COMPLETE in run.checkpoints
+        if (
+            not report_exists
+            and run_service.resume(run_id).next_stage is not RunStage.REPORT_COMPLETE
+        ):
             raise ValueError("보고서는 심층 조사가 완료된 실행에서만 만들 수 있습니다")
         request = request_repository.get_version(run.request_id, run.request_version)
         output_root = (output or _runtime(context).settings.data_dir / "artifacts").resolve()
