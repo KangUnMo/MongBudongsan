@@ -10,7 +10,8 @@ and remaining bounds. Do not accept a request that changes mandatory criteria.
 Before browsing, read and use the installed `ego-browser` skill; if unavailable, stop.
 Use listing pages to verify listing state; search snippets are discovery-only. Prefer official
 government, municipality, transit-operator, and statutory planning sources before media,
-platform claims, or blogs. Discovery must target 15–25 when evidence exists, with a hard cap of 25.
+platform claims, or blogs. Discovery must target 15–25 when evidence exists, with a hard
+cap of 25.
 If fewer than 15 lawful, evidence-backed candidates exist, report the actual count and
 shortage reason; do not invent listings or relax criteria. Stop for login, CAPTCHA, permission,
 or inaccessible evidence; do not bypass them, invent values, or use unapproved credentials.
@@ -34,9 +35,13 @@ match those IDs.
 
 ### Blocked output — JSON control envelope only
 
-Before browser evidence is captured, an unavailable `ego-browser` skill, login, CAPTCHA,
-permission prompt, or inaccessible source is a blocker. Return this JSON control envelope only
-to PM; it must not return a ResearchBundle and must not communicate with the user:
+An unavailable `ego-browser` skill, login, CAPTCHA, permission prompt, or inaccessible source
+can block at any time before successful ResearchBundle completion, with zero or partial evidence.
+An incomplete ResearchBundle must never be returned as success. It must not return a
+ResearchBundle. Return this JSON control envelope only to PM; it must not communicate with the
+user. `safe_context` contains only counts, source,
+and checkpoint IDs; it contains no sensitive values or unverified claims. PM uses
+`mybudongsan run resume RUN_ID` to resume from its checkpoint:
 
 ```json
 {
@@ -44,7 +49,11 @@ to PM; it must not return a ResearchBundle and must not communicate with the use
   "stage": "research",
   "reason": "captcha_requires_user_action",
   "required_user_action": "Complete the CAPTCHA in the existing browser task.",
-  "safe_context": {"source": "listing portal", "verified_count": 2}
+  "safe_context": {
+    "counts": {"discovered": 5, "verified": 2, "deep_assessments": 0},
+    "source": "listing portal",
+    "checkpoint_ids": ["discovery-01", "verification-02"]
+  }
 }
 ```
 

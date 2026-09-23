@@ -1,6 +1,6 @@
 ---
 name: mybudongsan-pm
-description: Use when coordinating a bounded, evidence-backed Korean real-estate listing research run with a user-approved request, browser evidence, optional specialist review, reports, and lifecycle notifications.
+description: Use when coordinating an evidence-backed Korean real-estate listing research workflow.
 ---
 
 # MyBudongsan PM
@@ -74,13 +74,21 @@ Use a maximum of five lifecycle event types for a run: `WORK_STARTED`,
 `NEEDS_ACTION` event when blocked), and terminal `COMPLETED` or `FAILED`. Do not add
 progress chatter as lifecycle events.
 
+`NEEDS_ACTION` replaces the `FINALIZING` progress slot; never emit both. With a specialist
+and a blocker, the five distinct types are `WORK_STARTED`, `RESEARCHER_ASSIGNED`,
+`SPECIALIST_ASSIGNED`, `NEEDS_ACTION`, and one terminal event. On resume, reuse the
+already emitted event set and do not emit `FINALIZING` after `NEEDS_ACTION`; when only a
+terminal event remains, emit only the terminal event.
+
 For a pending Kakao event, claim it in SQLite first:
 
 ```bash
 uv run mybudongsan notify pending RUN_ID --channel kakao
 ```
 
-Call only `PlayMCP:MemoChat` with that claimed payload. PM acknowledges only after confirmed delivery, using the exact event_id + claim_token returned by `pending` or `notify status`:
+Call only `PlayMCP:MemoChat` with that claimed payload. PM acknowledges only after
+confirmed delivery, using the exact event_id + claim_token returned by `pending` or
+`notify status`:
 
 ```bash
 uv run mybudongsan notify ack EVENT_ID --provider-id PROVIDER_ID --claim-token CLAIM_TOKEN
@@ -95,7 +103,10 @@ blind ack or retry: `notify ack` has no `--status` option, so do not invent one.
 first with the read-only command below, confirming the same event and token; only a provider
 receipt permits ack, and only confirmed non-delivery permits `notify fail` with the same token.
 
-`notify ack` requires both `--provider-id` and `--claim-token`. Do not use `mybudongsan notify ack EVENT_ID --claim-token CLAIM_TOKEN`; it is invalid and cannot prove delivery. Use only the exact acknowledgement command already shown above after a matching provider receipt.
+`notify ack` requires both `--provider-id` and `--claim-token`. Do not use
+`mybudongsan notify ack EVENT_ID --claim-token CLAIM_TOKEN`; it is invalid and cannot
+prove delivery. Use only the exact acknowledgement command already shown above after a
+matching provider receipt.
 
 ```bash
 uv run mybudongsan notify status RUN_ID --state dispatching --channel kakao
@@ -104,7 +115,8 @@ uv run mybudongsan notify fail EVENT_ID --error "confirmed not delivered" --clai
 
 If reconciliation cannot prove delivery or non-delivery, leave the claimed event `dispatching`
 for manual recovery and do not advance a success-dependent stage. If confirmed non-delivery
-is failed, run `notify fail` with the current token. After `notify fail`, stop that recovery turn; do not send. A later `notify pending` issues a new claim token before any
+is failed, run `notify fail` with the current token. After `notify fail`, stop that
+recovery turn; do not send. A later `notify pending` issues a new claim token before any
 fresh send. It may use only `PlayMCP:MemoChat`. If that tool is unavailable, stop Kakao
 delivery and request setup. Never expose message bodies, credentials, or claim tokens in the
 user report.

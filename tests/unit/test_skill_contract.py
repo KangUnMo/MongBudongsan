@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from mybudongsan.domain.scoring import EvaluationInput
+from mybudongsan.notifications.policy import NotificationEventType, NotificationPolicy
 from mybudongsan.research.contracts import (
     DeepAssessmentObservation,
     EvidenceObservation,
@@ -51,6 +52,7 @@ def _normalized(text: str) -> str:
 
 def test_mybudongsan_pm_skill_contract() -> None:
     text = _contents()
+    normalized = _normalized(text)
 
     assert text.startswith("---\nname: mybudongsan-pm\ndescription: Use when")
     assert "PM alone communicates conclusions to the user" in text
@@ -63,7 +65,7 @@ def test_mybudongsan_pm_skill_contract() -> None:
     assert "valid `ResearchBundle` JSON" in text
     assert "never auto-relaxes mandatory criteria" in text
     assert "only `PlayMCP:MemoChat`" in text
-    assert "only after confirmed delivery" in text
+    assert "only after confirmed delivery" in normalized
     assert "event_id + claim_token" in text
     assert "notify status" in text
     assert "never blind ack or retry" in _normalized(text).lower()
@@ -142,8 +144,38 @@ def test_researcher_has_unambiguous_success_and_blocker_envelopes() -> None:
     for field in ("status", "stage", "reason", "required_user_action", "safe_context"):
         assert f'"{field}"' in researcher
     assert '"status": "blocked"' in researcher
-    assert "must not return a ResearchBundle" in researcher
-    assert "must not communicate with the user" in researcher
+    assert "must not return a ResearchBundle" in _normalized(researcher)
+    assert "must not communicate with the user" in _normalized(researcher)
+
+
+def test_researcher_blocker_supports_partial_progress_without_a_bundle() -> None:
+    researcher = REFERENCES["researcher"].read_text(encoding="utf-8")
+
+    normalized = _normalized(researcher)
+    assert "at any time before successful ResearchBundle completion" in normalized
+    assert "zero or partial evidence" in normalized
+    assert "incomplete ResearchBundle must never be returned as success" in normalized
+    assert "`safe_context` contains only counts, source, and checkpoint IDs" in normalized
+    assert "no sensitive values or unverified claims" in normalized
+    assert "resume from its checkpoint" in normalized
+    assert '"counts"' in researcher
+    assert '"source"' in researcher
+    assert '"checkpoint_ids"' in researcher
+
+
+def test_lifecycle_needs_action_replaces_finalizing_and_resume_reuses_events() -> None:
+    events = NotificationPolicy().plan(specialist=True, needs_action=True)
+    event_types = {event.type for event in events}
+    pm = SKILL.read_text(encoding="utf-8")
+
+    assert len(event_types) == 5
+    assert NotificationEventType.NEEDS_ACTION in event_types
+    assert NotificationEventType.FINALIZING not in event_types
+    assert "`NEEDS_ACTION` replaces the `FINALIZING` progress slot" in pm
+    normalized = _normalized(pm)
+    assert "reuse the already emitted event set" in normalized
+    assert "do not emit `FINALIZING` after `NEEDS_ACTION`" in normalized
+    assert "when only a terminal event remains, emit only the terminal event" in normalized
 
 
 def test_researcher_documents_the_actual_research_bundle_schema() -> None:
@@ -174,9 +206,12 @@ def test_timeout_recovery_uses_only_the_claim_token_cli_contract() -> None:
     assert "confirmed non-delivery permits `notify fail`" in pm
     assert "new claim token" in pm
     assert "stop Kakao delivery and request setup" in _normalized(pm)
-    assert "Do not use `mybudongsan notify ack EVENT_ID --claim-token CLAIM_TOKEN`" in pm
+    assert (
+        "Do not use `mybudongsan notify ack EVENT_ID --claim-token CLAIM_TOKEN`"
+        in _normalized(pm)
+    )
     assert "requires both `--provider-id` and `--claim-token`" in pm
-    assert "After `notify fail`, stop that recovery turn; do not send" in pm
+    assert "After `notify fail`, stop that recovery turn; do not send" in _normalized(pm)
 
 
 def test_every_browser_role_requires_ego_browser_and_a_bounded_output() -> None:
