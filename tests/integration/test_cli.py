@@ -348,6 +348,64 @@ def test_report_retry_reuses_the_published_artifacts_without_duplicate_rows(
         assert session.scalar(select(func.count()).select_from(ReportModel)) == 1
 
 
+def test_report_retry_recovers_an_orphaned_immutable_directory_after_process_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    command = ["--data-dir", str(data_dir), "run", "report", run_id]
+
+    def crash_after_rename(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise KeyboardInterrupt("simulated process crash")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ReportRepository, "save_markdown", crash_after_rename)
+        crashed = runner.invoke(app, command)
+
+    report_paths = list((data_dir / "artifacts").rglob("report.md"))
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert crashed.exit_code != 0
+    assert len(report_paths) == 1
+    assert RunRepository(database).get(run_id).current_stage is RunStage.DEEP_RESEARCH_COMPLETE
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ReportModel)) == 0
+
+    recovered = runner.invoke(app, command)
+
+    assert recovered.exit_code == 0, recovered.output
+    assert Path(_field(recovered.output, "report_path")) == report_paths[0]
+    assert RunRepository(database).get(run_id).current_stage is RunStage.REPORT_COMPLETE
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ReportModel)) == 1
+
+
+def test_report_retry_refuses_a_mismatched_orphaned_immutable_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, run_id = _prepare_ingested_run(tmp_path)
+    command = ["--data-dir", str(data_dir), "run", "report", run_id]
+
+    def crash_after_rename(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise KeyboardInterrupt("simulated process crash")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ReportRepository, "save_markdown", crash_after_rename)
+        assert runner.invoke(app, command).exit_code != 0
+
+    report_path, = (data_dir / "artifacts").rglob("report.md")
+    report_path.write_text(report_path.read_text(encoding="utf-8") + "\ntampered\n", encoding="utf-8")
+
+    refused = runner.invoke(app, command)
+
+    assert refused.exit_code != 0
+    assert "checksum" in refused.output.lower()
+    database = Database(f"sqlite+pysqlite:///{data_dir / 'mybudongsan.sqlite3'}")
+    assert RunRepository(database).get(run_id).current_stage is RunStage.DEEP_RESEARCH_COMPLETE
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(ReportModel)) == 0
+
+
 def test_run_delete_previews_then_requires_exact_confirmation_and_preserves_shared_data(
     tmp_path: Path,
 ) -> None:

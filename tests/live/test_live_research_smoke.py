@@ -21,6 +21,19 @@ _REQUIRED_ENV = (
 )
 
 
+def _cleanup_sheet_range(response: object) -> str:
+    updated_range: object = None
+    if isinstance(response, dict):
+        updates = response.get("updates")
+        if isinstance(updates, dict):
+            updated_range = updates.get("updatedRange")
+    if not isinstance(updated_range, str) or not updated_range.strip():
+        print("cleanup_sheet_range=unknown")
+        raise AssertionError("successful Sheet row creation did not return updatedRange")
+    print(f"cleanup_sheet_range={updated_range}")
+    return updated_range
+
+
 @pytest.mark.live
 def test_user_authorized_google_smoke_creates_only_named_cleanup_targets() -> None:
     missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
@@ -62,8 +75,7 @@ def test_user_authorized_google_smoke_creates_only_named_cleanup_targets() -> No
         )
         .execute()
     )
-    updated_range = row_response.get("updates", {}).get("updatedRange", "unknown")
-    print(f"cleanup_sheet_range={updated_range}")
+    _cleanup_sheet_range(row_response)
 
     drive = create_drive_service(store)
     drive_response = (

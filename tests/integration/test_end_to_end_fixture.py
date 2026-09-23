@@ -198,19 +198,41 @@ def test_v1_fixture_acceptance_is_idempotent_across_resume(tmp_path: Path) -> No
             )
         }
     )
-    fixture = fixture.model_copy(update={"deep_assessments": tuple(deep_assessments)})
+    verified = list(fixture.verified)
+    verified[0] = verified[0].model_copy(
+        update={
+            "source_listing_id": fixture.discovered[0].source_listing_id,
+            "complex_name": fixture.discovered[0].complex_name,
+            "address": fixture.discovered[0].address,
+        }
+    )
+    fixture = fixture.model_copy(
+        update={
+            "verified": tuple(verified),
+            "deep_assessments": tuple(deep_assessments),
+        }
+    )
 
     ingest = ResearchBundleIngestService(database)
-    first_ingest = ingest.ingest("run-acceptance", fixture)
+    verification = ingest.ingest_through_verification("run-acceptance", fixture)
+    interrupted = run_repository.get("run-acceptance")
+    assert interrupted.current_stage is RunStage.VERIFICATION_COMPLETE
+    assert RunStage.DEEP_RESEARCH_COMPLETE not in interrupted.checkpoints
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 0
     run_service.fail_transient("run-acceptance", "simulated interruption after verification")
-    assert run_service.resume("run-acceptance").next_stage is RunStage.REPORT_COMPLETE
-    resumed_ingest = ingest.ingest("run-acceptance", fixture)
+    assert run_service.resume("run-acceptance").next_stage is RunStage.DEEP_RESEARCH_COMPLETE
+    first_ingest = ingest.resume_from_verification("run-acceptance", fixture)
+    resumed_ingest = ingest.resume_from_verification("run-acceptance", fixture)
+    assert first_ingest.created == 24
+    assert first_ingest.updated == 1
+    assert first_ingest.created == verification.created + 3
     assert resumed_ingest.created == first_ingest.created
     assert resumed_ingest.results == ()
     ingested_run = run_repository.get("run-acceptance")
-    assert ingested_run.checkpoints[RunStage.VERIFICATION_COMPLETE].checkpoint == {
-        "verified_count": 7
-    }
+    assert ingested_run.checkpoints[RunStage.VERIFICATION_COMPLETE].checkpoint[
+        "verified_count"
+    ] == 7
     assert ingested_run.checkpoints[RunStage.DEEP_RESEARCH_COMPLETE].checkpoint[
         "deep_assessment_count"
     ] == 3
@@ -287,9 +309,29 @@ def test_v1_fixture_acceptance_is_idempotent_across_resume(tmp_path: Path) -> No
     assert stored_final.checkpoint == final.checkpoint
 
     with database.session() as session:
-        assert session.scalar(select(func.count()).select_from(ListingModel)) == 25
+        listings = tuple(session.scalars(select(ListingModel)))
+        snapshots = tuple(session.scalars(select(ListingSnapshotModel)))
+        duplicate_listing = next(
+            listing
+            for listing in listings
+            if listing.source_listing_id == fixture.discovered[0].source_listing_id
+        )
+        duplicate_snapshots = [
+            snapshot for snapshot in snapshots if snapshot.listing_id == duplicate_listing.id
+        ]
+        verified_snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot.payload["observed_at"]
+            == fixture.verified[0].model_dump(mode="json")["observed_at"]
+        ]
+        assert len(listings) == 24
+        assert len(duplicate_snapshots) == 2
+        assert len(verified_snapshots) == 7
         assert session.scalar(select(func.count()).select_from(ListingSnapshotModel)) == 25
-        assert session.scalar(select(func.count()).select_from(AssessmentModel)) == 3
+        deep_count = session.scalar(select(func.count()).select_from(AssessmentModel))
+        assert deep_count == 3
+        assert len(report_bundle.candidates) <= 3
         assert session.scalar(select(func.count()).select_from(ReportModel)) == 1
         event_types = set(session.scalars(select(NotificationEventModel.event_type)))
         assert len(event_types) <= 5

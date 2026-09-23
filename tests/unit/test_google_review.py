@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,24 @@ def _request() -> SearchRequest:
             "status": "approved",
         }
     )
+
+
+def test_live_smoke_requires_and_prints_a_created_sheet_row_range(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_test = runpy.run_path(
+        str(Path(__file__).parents[1] / "live" / "test_live_research_smoke.py")
+    )
+    cleanup_sheet_range = live_test["_cleanup_sheet_range"]
+
+    assert cleanup_sheet_range(
+        {"updates": {"updatedRange": "'검색 요청'!A42:J42"}}
+    ) == "'검색 요청'!A42:J42"
+    assert "cleanup_sheet_range='검색 요청'!A42:J42" in capsys.readouterr().out
+
+    with pytest.raises(AssertionError, match="updatedRange"):
+        cleanup_sheet_range({"updates": {}})
+    assert "cleanup_sheet_range=unknown" in capsys.readouterr().out
 
 
 def _run(run_id: str) -> dict[str, object]:

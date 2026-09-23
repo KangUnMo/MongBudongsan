@@ -76,53 +76,127 @@ class ResearchBundleIngestService:
                 return _retry_summary(completed.checkpoint, fingerprint)
             if run.current_stage is not RunStage.REQUEST_APPROVED:
                 raise ValueError("조사 실행이 수집을 시작할 수 있는 단계가 아닙니다")
+            verification = self._ingest_through_verification(
+                session, run_id, bundle, fingerprint
+            )
+            return self._resume_from_verification(
+                session, run_id, bundle, fingerprint, verification
+            )
 
-            persisted_bundle = self._persist_evidence(session, run_id, bundle)
-            summary = self._listing_service.ingest_in_session(session, run_id, persisted_bundle)
-            deep_count = len(persisted_bundle.deep_assessments)
-            deep_results = summary.results[-deep_count:] if deep_count else ()
-            for deep_assessment, listing_result in zip(
-                persisted_bundle.deep_assessments,
-                deep_results,
-                strict=True,
-            ):
-                self._assessment_repository.save(
-                    run_id=run_id,
-                    listing_id=listing_result.listing_id,
-                    evaluation_input=deep_assessment.evaluation_input,
-                    session=session,
-                )
-            self._run_repository.advance(
+    def ingest_through_verification(
+        self, run_id: str, bundle: ResearchBundle
+    ) -> IngestSummary:
+        fingerprint = _bundle_fingerprint(bundle)
+        with self._database.session() as session:
+            run = self._run_repository.get(run_id, session=session)
+            completed = run.checkpoints.get(RunStage.VERIFICATION_COMPLETE)
+            if completed is not None:
+                return _retry_summary(completed.checkpoint, fingerprint)
+            if run.current_stage is not RunStage.REQUEST_APPROVED:
+                raise ValueError("조사 실행이 검증을 시작할 수 있는 단계가 아닙니다")
+            return self._ingest_through_verification(
+                session, run_id, bundle, fingerprint
+            )
+
+    def resume_from_verification(
+        self, run_id: str, bundle: ResearchBundle
+    ) -> IngestSummary:
+        fingerprint = _bundle_fingerprint(bundle)
+        with self._database.session() as session:
+            run = self._run_repository.get(run_id, session=session)
+            completed = run.checkpoints.get(RunStage.DEEP_RESEARCH_COMPLETE)
+            if completed is not None:
+                return _retry_summary(completed.checkpoint, fingerprint)
+            verification = run.checkpoints.get(RunStage.VERIFICATION_COMPLETE)
+            if verification is None or run.current_stage is not RunStage.VERIFICATION_COMPLETE:
+                raise ValueError("조사 실행이 검증 완료 체크포인트에 있지 않습니다")
+            verification_summary = _retry_summary(verification.checkpoint, fingerprint)
+            return self._resume_from_verification(
+                session, run_id, bundle, fingerprint, verification_summary
+            )
+
+    def _ingest_through_verification(
+        self,
+        session: Session,
+        run_id: str,
+        bundle: ResearchBundle,
+        fingerprint: str,
+    ) -> IngestSummary:
+        verification_bundle = bundle.model_copy(update={"deep_assessments": ()})
+        summary = self._listing_service.ingest_in_session(
+            session, run_id, verification_bundle
+        )
+        self._run_repository.advance(
+            run_id=run_id,
+            stage=RunStage.DISCOVERY_COMPLETE,
+            checkpoint={"discovered_count": len(bundle.discovered), "created": summary.created},
+            session=session,
+        )
+        self._run_repository.advance(
+            run_id=run_id,
+            stage=RunStage.FILTER_COMPLETE,
+            checkpoint={"candidate_count": len(bundle.verified)},
+            session=session,
+        )
+        self._run_repository.advance(
+            run_id=run_id,
+            stage=RunStage.VERIFICATION_COMPLETE,
+            checkpoint={
+                "verified_count": len(bundle.verified),
+                "ingest_fingerprint": fingerprint,
+                "created": summary.created,
+                "updated": summary.updated,
+                "duplicate_suspected": summary.duplicate_suspected,
+            },
+            session=session,
+        )
+        return summary
+
+    def _resume_from_verification(
+        self,
+        session: Session,
+        run_id: str,
+        bundle: ResearchBundle,
+        fingerprint: str,
+        verification: IngestSummary,
+    ) -> IngestSummary:
+        deep_only = bundle.model_copy(update={"discovered": (), "verified": ()})
+        persisted_bundle = self._persist_evidence(session, run_id, deep_only)
+        deep_summary = self._listing_service.ingest_in_session(
+            session, run_id, persisted_bundle
+        )
+        for deep_assessment, listing_result in zip(
+            persisted_bundle.deep_assessments,
+            deep_summary.results,
+            strict=True,
+        ):
+            self._assessment_repository.save(
                 run_id=run_id,
-                stage=RunStage.DISCOVERY_COMPLETE,
-                checkpoint={"discovered_count": len(bundle.discovered), "created": summary.created},
+                listing_id=listing_result.listing_id,
+                evaluation_input=deep_assessment.evaluation_input,
                 session=session,
             )
-            self._run_repository.advance(
-                run_id=run_id,
-                stage=RunStage.FILTER_COMPLETE,
-                checkpoint={"candidate_count": len(bundle.verified)},
-                session=session,
-            )
-            self._run_repository.advance(
-                run_id=run_id,
-                stage=RunStage.VERIFICATION_COMPLETE,
-                checkpoint={"verified_count": len(bundle.verified)},
-                session=session,
-            )
-            self._run_repository.advance(
-                run_id=run_id,
-                stage=RunStage.DEEP_RESEARCH_COMPLETE,
-                checkpoint={
-                    "deep_assessment_count": len(bundle.deep_assessments),
-                    "ingest_fingerprint": fingerprint,
-                    "created": summary.created,
-                    "updated": summary.updated,
-                    "duplicate_suspected": summary.duplicate_suspected,
-                },
-                session=session,
-            )
-            return summary
+        summary = IngestSummary(
+            created=verification.created + deep_summary.created,
+            updated=verification.updated + deep_summary.updated,
+            duplicate_suspected=(
+                verification.duplicate_suspected or deep_summary.duplicate_suspected
+            ),
+            results=verification.results + deep_summary.results,
+        )
+        self._run_repository.advance(
+            run_id=run_id,
+            stage=RunStage.DEEP_RESEARCH_COMPLETE,
+            checkpoint={
+                "deep_assessment_count": len(bundle.deep_assessments),
+                "ingest_fingerprint": fingerprint,
+                "created": summary.created,
+                "updated": summary.updated,
+                "duplicate_suspected": summary.duplicate_suspected,
+            },
+            session=session,
+        )
+        return summary
 
     def _persist_evidence(
         self, session: Session, run_id: str, bundle: ResearchBundle

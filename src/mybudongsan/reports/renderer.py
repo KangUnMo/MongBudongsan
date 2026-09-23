@@ -152,7 +152,7 @@ class ReportRenderer:
     )
 
     def render(self, bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
-        artifacts = self._final_artifacts(bundle, output_root)
+        artifacts = self.paths_for(bundle, output_root)
         artifacts.directory.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self._artifact_lock_path(artifacts.directory)
         lock_descriptor = self._acquire_artifact_lock(lock_path)
@@ -196,6 +196,10 @@ class ReportRenderer:
             os.close(lock_descriptor)
             lock_path.unlink(missing_ok=True)
         return artifacts
+
+    @staticmethod
+    def paths_for(bundle: ReportBundle, output_root: Path) -> RenderedArtifacts:
+        return ReportRenderer._final_artifacts(bundle, output_root)
 
     @staticmethod
     def _ensure_artifacts_are_new(artifacts: RenderedArtifacts) -> None:
